@@ -15,10 +15,15 @@ func (uart *UART) WaitReadableContext(ctx context.Context) error {
 		if uart.Buffered() > 0 {
 			return nil
 		}
+		uart.dbgReadWait()
 		select {
 		case <-uart.notify:
-			// loop to re-check Buffered()
+			// re-check; if empty, it was a spurious wake (coalesced notify)
+			if uart.Buffered() == 0 {
+				uart.dbgSpuriousWake()
+			}
 		case <-ctx.Done():
+			uart.dbgTimeout()
 			return ctx.Err()
 		}
 	}
@@ -29,18 +34,19 @@ func (uart *UART) RecvSomeContext(ctx context.Context, p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	// Fast path
 	if n, _ := uart.Read(p); n > 0 {
 		return n, nil
 	}
 	for {
+		uart.dbgReadWait()
 		select {
 		case <-uart.notify:
 			if n, _ := uart.Read(p); n > 0 {
 				return n, nil
 			}
-			// spurious wake; loop
+			uart.dbgSpuriousWake()
 		case <-ctx.Done():
+			uart.dbgTimeout()
 			return 0, ctx.Err()
 		}
 	}
@@ -52,12 +58,15 @@ func (uart *UART) RecvByteContext(ctx context.Context) (byte, error) {
 		return b, nil
 	}
 	for {
+		uart.dbgReadWait()
 		select {
 		case <-uart.notify:
 			if b, err := uart.ReadByte(); err == nil {
 				return b, nil
 			}
+			uart.dbgSpuriousWake()
 		case <-ctx.Done():
+			uart.dbgTimeout()
 			return 0, ctx.Err()
 		}
 	}
