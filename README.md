@@ -2,7 +2,7 @@
 
 An experimental UART driver for the RP2040/RP2350 written in TinyGo.
 
-It mirrors the public API of `machine.UART` (non-blocking `Read`, `ReadByte`; blocking `Write`, `WriteByte`) but adds extra helpers for **blocking reads** (`ReadBlocking`, `ReadFullBlocking`, `ReadByteBlocking`, etc.).
+It mirrors the public API of `machine.UART` (non-blocking `Read`, `ReadByte`; blocking `Write`, `WriteByte`) but adds extra helpers for **blocking reads** (`Readable`, `WaitReadableContext`, `RecvSomeContext`, `RecvByteContext` etc.).
 
 The goal is to make higher-level services (like our bridge) easier to write without rolling their own polling logic.
 
@@ -32,15 +32,7 @@ tinygo flash -target=pico ./examples/loopback
 ```
 
 3. Open a serial console at 115200.
-4. You should see:
-
-```
-ping
-echo: ping
-ping
-echo: ping
-...
-```
+4. You should see the output from various tests
 
 This confirms RX interrupts, blocking reads, and writes are working correctly.
 
