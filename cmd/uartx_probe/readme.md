@@ -29,7 +29,7 @@ After each phase the test prints a diagnostic summary from the instrumented buil
    ```
 
 2. **Connect loopback**
-   Link UART0's TX and RX pins on the board as before (so transmitted bytes are immediately received).
+   Link UART1's TX and RX pins on the board this time (so transmitted bytes are immediately received).
 
 3. **Open a serial monitor**
    Open a serial terminal on the board’s USB serial port.

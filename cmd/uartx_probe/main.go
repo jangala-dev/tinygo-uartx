@@ -67,7 +67,7 @@ func main() {
 	}
 	println("uartx probe (diagnostic)")
 
-	u := uartx.UART0
+	u := uartx.UART1
 	if err := u.Configure(uartx.UARTConfig{
 		BaudRate: baud,
 		TX:       uartx.UART_TX_PIN,
