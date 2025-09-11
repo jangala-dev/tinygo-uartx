@@ -57,15 +57,15 @@ func ledBlink(times int, on time.Duration) {
 
 func main() {
 	// Allow time to open the serial monitor
-	time.Sleep(2 * time.Second)
+	time.Sleep(5 * time.Second)
 
 	println("uartx self-test starting")
 
 	u := uartx.UART1
 	err := u.Configure(uartx.UARTConfig{
 		BaudRate: baud,
-		TX:       uartx.UART_TX_PIN,
-		RX:       uartx.UART_RX_PIN,
+		TX:       uartx.UART1_TX_PIN,
+		RX:       uartx.UART1_RX_PIN,
 	})
 	if err != nil {
 		println("Configure failed")

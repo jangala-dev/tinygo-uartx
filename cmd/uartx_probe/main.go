@@ -70,8 +70,8 @@ func main() {
 	u := uartx.UART1
 	if err := u.Configure(uartx.UARTConfig{
 		BaudRate: baud,
-		TX:       uartx.UART_TX_PIN,
-		RX:       uartx.UART_RX_PIN,
+		TX:       uartx.UART1_TX_PIN,
+		RX:       uartx.UART1_RX_PIN,
 	}); err != nil {
 		println("fatal:", err)
 		for {

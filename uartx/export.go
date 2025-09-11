@@ -8,7 +8,9 @@ type UARTConfig = machine.UARTConfig
 type Pin = machine.Pin
 
 const (
-	NoPin       = machine.NoPin
-	UART_TX_PIN = machine.UART_TX_PIN
-	UART_RX_PIN = machine.UART_RX_PIN
+	NoPin        = machine.NoPin
+	UART_TX_PIN  = machine.UART_TX_PIN
+	UART_RX_PIN  = machine.UART_RX_PIN
+	UART1_TX_PIN = machine.UART1_TX_PIN
+	UART1_RX_PIN = machine.UART1_RX_PIN
 )
