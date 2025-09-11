@@ -10,12 +10,17 @@ import (
 	"runtime/interrupt"
 )
 
+type uartStatsHolder interface{}
+
 // UART on the RP2040.
 type UART struct {
 	Buffer    *machine.RingBuffer
 	Bus       *rp.UART0_Type
 	Interrupt interrupt.Interrupt
 	notify    chan struct{} // wake-up hint for blocking reads
+
+	// Debug (uartxdebug tag only)
+	stats Stats
 }
 
 // Configure the UART.
@@ -157,12 +162,20 @@ func initUART(uart *UART) {
 // handleInterrupt should be called from the appropriate interrupt handler for
 // this UART instance.
 func (uart *UART) handleInterrupt(interrupt.Interrupt) {
+	drained := 0
 	for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_RXFE) {
-		uart.Receive(byte((uart.Bus.UARTDR.Get() & 0xFF)))
+		dr := uart.Bus.UARTDR.Get()
+		ok := uart.Buffer.Put(byte(dr & 0xFF)) // inline Put to see outcome
+		uart.dbgOnByte(dr, ok)
+		drained++
 	}
-	// edge-triggered notify
+	uart.dbgISR(drained)
+
+	sent := false
 	select {
 	case uart.notify <- struct{}{}:
+		sent = true
 	default:
 	}
+	uart.dbgNotify(sent)
 }
