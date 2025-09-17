@@ -11,6 +11,8 @@ const (
 	NoPin        = machine.NoPin
 	UART_TX_PIN  = machine.UART_TX_PIN
 	UART_RX_PIN  = machine.UART_RX_PIN
+	UART0_RX_PIN = machine.UART0_RX_PIN
+	UART0_TX_PIN = machine.UART0_TX_PIN
 	UART1_TX_PIN = machine.UART1_TX_PIN
 	UART1_RX_PIN = machine.UART1_RX_PIN
 )
