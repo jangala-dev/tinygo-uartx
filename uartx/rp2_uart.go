@@ -1,13 +1,13 @@
-// uartx/machine_rp2_uart.go
-
 //go:build rp2040 || rp2350
 
 package uartx
 
 import (
+	"device/arm"
 	"device/rp"
 	"machine"
 	"runtime/interrupt"
+	"sync/atomic"
 )
 
 type uartStatsHolder interface{}
@@ -18,6 +18,10 @@ type UART struct {
 	Bus       *rp.UART0_Type
 	Interrupt interrupt.Interrupt
 	notify    chan struct{} // wake-up hint for blocking reads
+
+	// SEV/WFE notifier state
+	wakeFlag        uint32 // set to 1 by ISR to indicate RX activity
+	notifierStarted uint32 // guards starting the notifier goroutine
 
 	// Debug (uartxdebug tag only)
 	stats Stats
@@ -78,6 +82,11 @@ func (uart *UART) Configure(config machine.UARTConfig) error {
 
 	// Setup interrupt on receive.
 	uart.Bus.UARTIMSC.Set(rp.UART0_UARTIMSC_RXIM)
+
+	// Start the background notifier once.
+	if atomic.CompareAndSwapUint32(&uart.notifierStarted, 0, 1) {
+		go uart.runNotifier()
+	}
 
 	return nil
 }
@@ -171,11 +180,28 @@ func (uart *UART) handleInterrupt(interrupt.Interrupt) {
 	}
 	uart.dbgISR(drained)
 
-	sent := false
-	select {
-	case uart.notify <- struct{}{}:
-		sent = true
-	default:
+	// Edge-triggered notify (moved out of ISR): set flag and SEV only.
+	atomic.StoreUint32(&uart.wakeFlag, 1)
+	arm.Asm("sev")
+
+	// We no longer send on uart.notify from the ISR.
+	uart.dbgNotify(false)
+}
+
+// runNotifier forwards SEV/WFE wake-ups to the coalesced notify channel.
+func (uart *UART) runNotifier() {
+	for {
+		// Arm for the next event and wait.
+		atomic.StoreUint32(&uart.wakeFlag, 0)
+		arm.Asm("wfe")
+
+		// Filter spurious wakes; only forward if ISR set wakeFlag.
+		if atomic.LoadUint32(&uart.wakeFlag) == 0 {
+			continue
+		}
+		select {
+		case uart.notify <- struct{}{}:
+		default:
+		}
 	}
-	uart.dbgNotify(sent)
 }
