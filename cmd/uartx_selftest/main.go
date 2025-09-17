@@ -64,8 +64,8 @@ func main() {
 	u := uartx.UART0
 	err := u.Configure(uartx.UARTConfig{
 		BaudRate: baud,
-		TX:       uartx.UART_TX_PIN,
-		RX:       uartx.UART_RX_PIN,
+		TX:       uartx.UART0_TX_PIN,
+		RX:       uartx.UART0_RX_PIN,
 	})
 	if err != nil {
 		println("Configure failed")
@@ -110,7 +110,7 @@ func main() {
 	run("sanity: short loopback", func() string {
 		drain(u)
 		msg := []byte("hello, uartx" + lineEnding)
-		_, _ = u.Write(msg)
+		go func() { _, _ = u.Write(msg) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 		got, err := recvExact(ctx, u, len(msg))
@@ -179,34 +179,41 @@ func main() {
 	run("framing: two lines", func() string {
 		drain(u)
 		data := []byte("first line\r\nsecond line\n")
-		_, _ = u.Write(data)
+		go func() { _, _ = u.Write(data) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		got, _ := recvExact(ctx, u, len(data))
+		got, err := recvExact(ctx, u, len(data))
+		if err != nil {
+			return "timeout"
+		}
 		if string(got) != string(data) {
 			return "mismatch"
 		}
 		return ""
 	})
 
-	run("binary: 1024 bytes integrity", func() string {
+	run("binary: 4 KiB integrity", func() string {
 		drain(u)
-		src := make([]byte, 1024)
+		n := 4 * 1024
+		src := make([]byte, n)
 		var x uint32 = 0x12345678
 		for i := range src {
 			x = 1664525*x + 1013904223
 			src[i] = byte(x >> 24)
 		}
 		wantHash := sha1.Sum(src)
-		_, _ = u.Write(src)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		// Concurrent write so the reader can drain.
+		go func() { _, _ = u.Write(src) }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		got, _ := recvExact(ctx, u, len(src))
-		gotHash := sha1.Sum(got)
-		for i := range wantHash {
-			if wantHash[i] != gotHash[i] {
-				return "hash mismatch"
-			}
+		got, err := recvExact(ctx, u, n)
+		if err != nil || len(got) != n {
+			return "timeout/short read"
+		}
+		if sha1.Sum(got) != wantHash {
+			return "hash mismatch"
 		}
 		return ""
 	})
@@ -234,13 +241,26 @@ func main() {
 		for i := 0; i < n; i++ {
 			src[i] = byte(i * 31)
 		}
+
+		start := time.Now()
 		go func() { _, _ = u.Write(src) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_, err := recvExact(ctx, u, n)
+		elapsed := time.Since(start)
 		if err != nil {
 			return "timeout"
 		}
+
+		// Report speed as kilobits per second (kbps, decimal).
+		ms := int(elapsed / time.Millisecond)
+		if ms <= 0 {
+			ms = 1
+		}
+		// kbps = (n bytes * 8) / ms ; x100 for two decimals, rounded
+		kbpsX100 := (n*8*100 + ms/2) / ms
+		println("  speed =", formatFixed2(kbpsX100), "kbps")
+
 		return ""
 	})
 
@@ -248,10 +268,13 @@ func main() {
 		_ = u.SetFormat(8, 1, uartx.ParityNone)
 		drain(u)
 		msg := []byte("format-ok" + lineEnding)
-		_, _ = u.Write(msg)
+		go func() { _, _ = u.Write(msg) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		got, _ := recvExact(ctx, u, len(msg))
+		got, err := recvExact(ctx, u, len(msg))
+		if err != nil {
+			return "timeout"
+		}
 		if string(got) != string(msg) {
 			return "mismatch"
 		}
@@ -260,4 +283,49 @@ func main() {
 
 	println("")
 	println("All tests completed")
+}
+
+// --- tiny helpers (no fmt) ---
+
+// itoa converts an int to decimal ASCII.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + (n % 10))
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+func twoDigits(n int) string {
+	if n < 10 {
+		return "0" + itoa(n)
+	}
+	return itoa(n)
+}
+
+// formatFixed2 formats an integer representing value×100 (two decimals).
+func formatFixed2(x int) string {
+	sign := ""
+	if x < 0 {
+		sign = "-"
+		x = -x
+	}
+	whole := x / 100
+	frac := x % 100
+	return sign + itoa(whole) + "." + twoDigits(frac)
 }
