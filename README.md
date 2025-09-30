@@ -1,26 +1,12 @@
 # tinygo-uartx
 
+**IN TINYGO 0.39 THIS WILL ONLY WORK WITH THE SINGLE CORE SCHEDULER** using `-scheduler tasks`
+
 An experimental UART driver for the RP2040/RP2350 written in TinyGo.
 
 It mirrors the public API of `machine.UART` (non-blocking `Read`, `ReadByte`; blocking `Write`, `WriteByte`) but adds extra helpers for **blocking reads** (`Readable`, `WaitReadableContext`, `RecvSomeContext`, `RecvByteContext`).
 
 The goal is to make higher-level services (like our bridge) easier to write without rolling their own polling logic.
-
-## Repo structure
-
-```
-uartx/
-  uartx_rp2.go     # real RP2040 implementation
-  uartx_host.go    # host-only shim so unit tests run on a laptop
-  uartx_test.go    # portable tests
-
-cmd/
-  uartx_selftest/
-    main.go        # simple loopback test for Pico
-```
-
-* On your laptop: `go test ./uartx` runs the host shim and checks buffer/notify logic.
-* On device: flash one of the examples with `tinygo flash -target=pico ./examples/...`.
 
 ## Quick test on hardware (loopback)
 
@@ -38,7 +24,6 @@ This confirms RX interrupts, blocking reads, and writes are working correctly.
 
 ## Notes
 
-* On host, the shim (`uartx_host.go`) provides just enough to run unit tests.
 * On hardware, the ISR in `uartx_rp2.go` handles RX interrupts and signals blocking readers.
 * Don’t use `machine.UART0` and `uartx.UART0` together in the same program.
 * If you want to add more test programmes, put them under `examples/`.
