@@ -23,65 +23,58 @@ type UART struct {
 }
 
 // Configure the UART.
-func (uart *UART) Configure(config machine.UARTConfig) error {
+func (uart *UART) Configure(cfg machine.UARTConfig) error {
 	initUART(uart)
 
-	// Default baud rate to 115200.
-	if config.BaudRate == 0 {
-		config.BaudRate = 115200
+	if cfg.BaudRate == 0 {
+		cfg.BaudRate = 115200
+	}
+	if cfg.TX == machine.NoPin && cfg.RX == machine.NoPin {
+		cfg.TX = machine.UART_TX_PIN
+		cfg.RX = machine.UART_RX_PIN
 	}
 
-	// Use default pins if pins are not set.
-	if config.TX == 0 && config.RX == 0 {
-		// use default pins
-		config.TX = machine.UART_TX_PIN
-		config.RX = machine.UART_RX_PIN
+	// 1) Disable while configuring.
+	uart.Bus.UARTCR.ClearBits(rp.UART0_UARTCR_UARTEN | rp.UART0_UARTCR_RXE | rp.UART0_UARTCR_TXE)
+
+	// 2) Mux pins first.
+	if cfg.TX != machine.NoPin {
+		cfg.TX.Configure(machine.PinConfig{Mode: machine.PinUART})
+	}
+	if cfg.RX != machine.NoPin {
+		cfg.RX.Configure(machine.PinConfig{Mode: machine.PinUART})
+	}
+	if cfg.RTS != machine.NoPin {
+		cfg.RTS.Configure(machine.PinConfig{Mode: machine.PinUART})
+	}
+	if cfg.CTS != machine.NoPin {
+		cfg.CTS.Configure(machine.PinConfig{Mode: machine.PinUART})
 	}
 
-	uart.SetBaudRate(config.BaudRate)
+	// 3) Divisors and LCR_H.
+	uart.SetBaudRate(cfg.BaudRate)       // include the ‘dummy’ LCR_H write
+	_ = uart.SetFormat(8, 1, ParityNone) // make SetFormat do a single Set(...), include FEN
 
-	// default to 8-1-N
-	uart.SetFormat(8, 1, ParityNone)
-
-	// Enable the UART, both TX and RX
-	settings := uint32(rp.UART0_UARTCR_UARTEN |
-		rp.UART0_UARTCR_RXE |
-		rp.UART0_UARTCR_TXE)
-	if config.RTS != 0 {
-		settings |= rp.UART0_UARTCR_RTSEN
-	}
-	if config.CTS != 0 {
-		settings |= rp.UART0_UARTCR_CTSEN
+	// 4) Clear pending interrupts and purge RX FIFO (read until empty).
+	uart.Bus.UARTICR.Set(0x7FF) // clear all PL011 IRQs
+	for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_RXFE) {
+		_ = uart.Bus.UARTDR.Get() // discard any stale byte
 	}
 
-	uart.Bus.UARTCR.SetBits(settings)
+	// 5) Enable UART and flow control (only if both pins are valid).
+	settings := uint32(rp.UART0_UARTCR_UARTEN | rp.UART0_UARTCR_RXE | rp.UART0_UARTCR_TXE)
+	if cfg.RTS != machine.NoPin && cfg.CTS != machine.NoPin {
+		settings |= rp.UART0_UARTCR_RTSEN | rp.UART0_UARTCR_CTSEN
+	}
+	uart.Bus.UARTCR.Set(settings)
 
-	// set GPIO mux to UART for the pins
-	if config.TX != machine.NoPin {
-		config.TX.Configure(machine.PinConfig{Mode: machine.PinUART})
-	}
-	if config.RX != machine.NoPin {
-		config.RX.Configure(machine.PinConfig{Mode: machine.PinUART})
-	}
-	if config.RTS != 0 {
-		config.RTS.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	}
-	if config.CTS != 0 {
-		config.CTS.Configure(machine.PinConfig{Mode: machine.PinInput})
-	}
-
-	// IRQs
+	// 6) IRQs.
 	uart.Interrupt.SetPriority(0x80)
 	uart.Interrupt.Enable()
-
-	// FIFO interrupt trigger levels (defaults are acceptable)
 	uart.Bus.UARTIFLS.Set(0)
+	uart.Bus.UARTIMSC.Set(rp.UART0_UARTIMSC_RXIM | rp.UART0_UARTIMSC_RTIM) // TXIM on demand
 
-	// Enable RX IRQs: level-based (RXIM) and receive-timeout (RTIM).
-	// TX IRQ is enabled on demand when data are queued.
-	uart.Bus.UARTIMSC.Set(rp.UART0_UARTIMSC_RXIM | rp.UART0_UARTIMSC_RTIM)
-
-	// Emit an initial writable notification because TX FIFO starts empty.
+	// 7) Initial writable notification (FIFO starts empty).
 	select {
 	case uart.txNotify <- struct{}{}:
 	default:
@@ -219,7 +212,13 @@ func (uart *UART) handleInterrupt(interrupt.Interrupt) {
 	// RX path
 	if (mis & (rp.UART0_UARTMIS_RXMIS | rp.UART0_UARTMIS_RTMIS)) != 0 {
 		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_RXFE) {
-			uart.Receive(byte(uart.Bus.UARTDR.Get() & 0xFF))
+			r := uart.Bus.UARTDR.Get()
+			if (r & (rp.UART0_UARTDR_OE | rp.UART0_UARTDR_BE |
+				rp.UART0_UARTDR_PE | rp.UART0_UARTDR_FE)) != 0 {
+				// Discard errored byte; reading cleared the flags.
+				continue
+			}
+			uart.Receive(byte(r & 0xFF))
 		}
 		// Clear RX level and RX timeout interrupts.
 		uart.Bus.UARTICR.Set(rp.UART0_UARTICR_RXIC | rp.UART0_UARTICR_RTIC)
