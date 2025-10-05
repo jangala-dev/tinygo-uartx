@@ -11,10 +11,15 @@ import (
 
 // UART on the RP2040.
 type UART struct {
-	Buffer    *machine.RingBuffer
-	Bus       *rp.UART0_Type
+	// RX
+	Buffer *machine.RingBuffer
+	Bus    *rp.UART0_Type
+	// TX
+	TxBuffer *machine.RingBuffer
+	txNotify chan struct{} // TX space/drain readiness
+
 	Interrupt interrupt.Interrupt
-	notify    chan struct{} // wake-up hint for blocking reads
+	notify    chan struct{} // RX readiness
 }
 
 // Configure the UART.
@@ -42,7 +47,6 @@ func (uart *UART) Configure(config machine.UARTConfig) error {
 	settings := uint32(rp.UART0_UARTCR_UARTEN |
 		rp.UART0_UARTCR_RXE |
 		rp.UART0_UARTCR_TXE)
-	const bits = rp.UART0_UARTCR_UARTEN | rp.UART0_UARTCR_TXE
 	if config.RTS != 0 {
 		settings |= rp.UART0_UARTCR_RTSEN
 	}
@@ -66,12 +70,22 @@ func (uart *UART) Configure(config machine.UARTConfig) error {
 		config.CTS.Configure(machine.PinConfig{Mode: machine.PinInput})
 	}
 
-	// Enable RX IRQ.
+	// IRQs
 	uart.Interrupt.SetPriority(0x80)
 	uart.Interrupt.Enable()
 
-	// Setup interrupt on receive.
-	uart.Bus.UARTIMSC.Set(rp.UART0_UARTIMSC_RXIM)
+	// FIFO interrupt trigger levels (defaults are acceptable)
+	uart.Bus.UARTIFLS.Set(0)
+
+	// Enable RX IRQs: level-based (RXIM) and receive-timeout (RTIM).
+	// TX IRQ is enabled on demand when data are queued.
+	uart.Bus.UARTIMSC.Set(rp.UART0_UARTIMSC_RXIM | rp.UART0_UARTIMSC_RTIM)
+
+	// Emit an initial writable notification because TX FIFO starts empty.
+	select {
+	case uart.txNotify <- struct{}{}:
+	default:
+	}
 
 	return nil
 }
@@ -103,27 +117,9 @@ func (uart *UART) SetBaudRate(br uint32) {
 	uart.Bus.UARTLCR_H.SetBits(0)
 }
 
-// WriteByte writes a byte of data to the UART.
-func (uart *UART) writeByte(c byte) error {
-	// wait until buffer is not full
-	for uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
-		gosched()
-	}
-
-	// write data
-	uart.Bus.UARTDR.Set(uint32(c))
-	return nil
-}
-
-func (uart *UART) flush() {
-	for uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_BUSY) {
-		gosched()
-	}
-}
-
 // SetFormat for number of data bits, stop bits, and parity for the UART.
 func (uart *UART) SetFormat(databits, stopbits uint8, parity UARTParity) error {
-	var pen, pev uint8
+	var pen, pev, fen uint8
 	if parity != ParityNone {
 		pen = rp.UART0_UARTLCR_H_PEN
 	}
@@ -133,6 +129,14 @@ func (uart *UART) SetFormat(databits, stopbits uint8, parity UARTParity) error {
 	uart.Bus.UARTLCR_H.SetBits(uint32((databits-5)<<rp.UART0_UARTLCR_H_WLEN_Pos |
 		(stopbits-1)<<rp.UART0_UARTLCR_H_STP2_Pos |
 		pen | pev))
+
+	// Enable hardware FIFOs (32-entry TX/RX) so IRQ thresholds and TXFE/RXFE behave as expected.
+	fen = rp.UART0_UARTLCR_H_FEN
+
+	uart.Bus.UARTLCR_H.SetBits(uint32(
+		(databits-5)<<rp.UART0_UARTLCR_H_WLEN_Pos |
+			(stopbits-1)<<rp.UART0_UARTLCR_H_STP2_Pos |
+			pen | pev | fen))
 
 	return nil
 }
@@ -153,15 +157,109 @@ func initUART(uart *UART) {
 	}
 }
 
-// handleInterrupt should be called from the appropriate interrupt handler for
-// this UART instance.
+// --- TX helpers ---
+
+func (uart *UART) enableTxIRQ() {
+	uart.Bus.UARTIMSC.SetBits(rp.UART0_UARTIMSC_TXIM)
+}
+
+// txFifoEmpty reports PL011 TX FIFO empty.
+func (uart *UART) txFifoEmpty() bool {
+	return uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFE)
+}
+
+// tryWriteHW pushes as many bytes as possible directly into the HW FIFO (non-blocking).
+func (uart *UART) tryWriteHW(p []byte) int {
+	i := 0
+	for i < len(p) && !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
+		uart.Bus.UARTDR.Set(uint32(p[i]))
+		i++
+	}
+	return i
+}
+
+// enqueueTX inserts bytes into the software TX buffer (non-blocking).
+func (uart *UART) enqueueTX(p []byte) int {
+	i := 0
+	for i < len(p) {
+		if ok := uart.TxBuffer.Put(p[i]); !ok {
+			break
+		}
+		i++
+	}
+	return i
+}
+
+// SendSome tries to enqueue up to len(p) bytes, non-blocking.
+// Returns the number of bytes accepted into the HW FIFO and/or software TX buffer.
+func (uart *UART) SendSome(p []byte) int {
+	if len(p) == 0 {
+		return 0
+	}
+	// First, opportunistically push into HW FIFO.
+	n := uart.tryWriteHW(p)
+	if n > 0 {
+		uart.enableTxIRQ() // ensure we get TX IRQs as FIFO drains
+		return n
+	}
+	// Next, enqueue into software buffer.
+	m := uart.enqueueTX(p)
+	if m > 0 {
+		uart.enableTxIRQ()
+		return m
+	}
+	return 0
+}
+
+// --- RX/TX ISR ---
+
 func (uart *UART) handleInterrupt(interrupt.Interrupt) {
-	for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_RXFE) {
-		uart.Receive(byte((uart.Bus.UARTDR.Get() & 0xFF)))
+	mis := uart.Bus.UARTMIS.Get()
+
+	// RX path
+	if (mis & (rp.UART0_UARTMIS_RXMIS | rp.UART0_UARTMIS_RTMIS)) != 0 {
+		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_RXFE) {
+			uart.Receive(byte(uart.Bus.UARTDR.Get() & 0xFF))
+		}
+		// Clear RX level and RX timeout interrupts.
+		uart.Bus.UARTICR.Set(rp.UART0_UARTICR_RXIC | rp.UART0_UARTICR_RTIC)
+		select {
+		case uart.notify <- struct{}{}:
+		default:
+		}
 	}
 
-	select {
-	case uart.notify <- struct{}{}:
-	default:
+	// TX path
+	if mis&rp.UART0_UARTMIS_TXMIS != 0 {
+		// Move bytes from SW buffer to HW FIFO.
+		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
+			b, ok := uart.TxBuffer.Get()
+			if !ok {
+				break
+			}
+			uart.Bus.UARTDR.Set(uint32(b))
+		}
+
+		// Notify writers that space likely became available.
+		select {
+		case uart.txNotify <- struct{}{}:
+		default:
+		}
+
+		// If SW buffer empty, consider TX done for FIFO semantics.
+		if uart.TxBuffer.Used() == 0 {
+			// If FIFO now empty, coalesce a final "drained" notification.
+			if uart.txFifoEmpty() {
+				select {
+				case uart.txNotify <- struct{}{}:
+				default:
+				}
+			}
+			// Disable TX IRQ until more data is queued.
+			uart.Bus.UARTIMSC.ClearBits(rp.UART0_UARTIMSC_TXIM)
+		}
+
+		// Clear TX interrupt.
+		uart.Bus.UARTICR.Set(rp.UART0_UARTICR_TXIC)
 	}
 }

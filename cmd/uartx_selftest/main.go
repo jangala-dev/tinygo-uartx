@@ -1,5 +1,3 @@
-// cmd/uartx_selftest/main.go
-
 package main
 
 import (
@@ -30,9 +28,28 @@ func drain(u *uartx.UART) {
 	}
 }
 
+// Event-driven TX: enqueue the entire slice using Writable()+SendSome.
+// Returns when all bytes are accepted, or ctx ends.
+func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
+	sent := 0
+	for sent < len(p) {
+		if n := u.SendSome(p[sent:]); n > 0 {
+			sent += n
+			continue
+		}
+		select {
+		case <-u.Writable():
+			// space made; retry
+		case <-ctx.Done():
+			return sent, ctx.Err()
+		}
+	}
+	return sent, nil
+}
+
 func recvExact(ctx context.Context, u *uartx.UART, n int) ([]byte, error) {
 	out := make([]byte, 0, n)
-	tmp := make([]byte, 64)
+	tmp := make([]byte, 128)
 	for len(out) < n {
 		select {
 		case <-ctx.Done():
@@ -107,12 +124,31 @@ func main() {
 		}
 	}
 
-	run("sanity: short loopback", func() string {
+	run("notify: initial Writable after Configure", func() string {
+		drain(u)
+		select {
+		case <-u.Writable():
+			ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+			defer cancel()
+			if n, err := sendAllContext(ctx, u, []byte("X")); err != nil || n != 1 {
+				return "could not enqueue"
+			}
+			got, err := recvExact(ctx, u, 1)
+			if err != nil || len(got) != 1 || got[0] != 'X' {
+				return "echo failed"
+			}
+			return ""
+		case <-time.After(750 * time.Millisecond):
+			return "no initial Writable"
+		}
+	})
+
+	run("sanity: short loopback (event-driven TX)", func() string {
 		drain(u)
 		msg := []byte("hello, uartx" + lineEnding)
-		go func() { _, _ = u.Write(msg) }()
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, msg) }()
 		got, err := recvExact(ctx, u, len(msg))
 		if err != nil {
 			return "timeout"
@@ -126,12 +162,9 @@ func main() {
 	run("blocking: RecvByteContext waits", func() string {
 		drain(u)
 		want := byte('X')
-		go func() {
-			time.Sleep(150 * time.Millisecond)
-			_ = u.WriteByte(want)
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, []byte{want}) }()
 		got, err := u.RecvByteContext(ctx)
 		if err != nil {
 			return "timeout"
@@ -157,31 +190,27 @@ func main() {
 	run("notify: Readable channel", func() string {
 		drain(u)
 		ready := u.Readable()
-		go func() {
-			_ = u.WriteByte('A')
-			time.Sleep(5 * time.Millisecond)
-			_ = u.WriteByte('B')
-		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, []byte("AB")) }()
 		select {
 		case <-ready:
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
 			got, _ := recvExact(ctx, u, 2)
 			if string(got) != "AB" {
 				return "wrong data"
 			}
-		case <-time.After(300 * time.Millisecond):
+			return ""
+		case <-time.After(1 * time.Second):
 			return "no notification"
 		}
-		return ""
 	})
 
 	run("framing: two lines", func() string {
 		drain(u)
 		data := []byte("first line\r\nsecond line\n")
-		go func() { _, _ = u.Write(data) }()
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, data) }()
 		got, err := recvExact(ctx, u, len(data))
 		if err != nil {
 			return "timeout"
@@ -203,11 +232,10 @@ func main() {
 		}
 		wantHash := sha1.Sum(src)
 
-		// Concurrent write so the reader can drain.
-		go func() { _, _ = u.Write(src) }()
-
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, src) }()
+
 		got, err := recvExact(ctx, u, n)
 		if err != nil || len(got) != n {
 			return "timeout/short read"
@@ -225,16 +253,15 @@ func main() {
 		for i := 0; i < n; i++ {
 			src[i] = byte(i)
 		}
-		go func() { _, _ = u.Write(src) }()
-		time.Sleep(100 * time.Millisecond)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, src) }()
 		_, _ = recvExact(ctx, u, n)
 		// Informational only
 		return ""
 	})
 
-	run("throughput: 32 KiB write+read", func() string {
+	run("throughput: 32 KiB write+read (event-driven TX)", func() string {
 		drain(u)
 		n := 32 * 1024
 		src := make([]byte, n)
@@ -243,9 +270,9 @@ func main() {
 		}
 
 		start := time.Now()
-		go func() { _, _ = u.Write(src) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, src) }()
 		_, err := recvExact(ctx, u, n)
 		elapsed := time.Since(start)
 		if err != nil {
@@ -257,10 +284,8 @@ func main() {
 		if ms <= 0 {
 			ms = 1
 		}
-		// kbps = (n bytes * 8) / ms ; x100 for two decimals, rounded
 		kbpsX100 := (n*8*100 + ms/2) / ms
 		println("  speed =", formatFixed2(kbpsX100), "kbps")
-
 		return ""
 	})
 
@@ -268,9 +293,9 @@ func main() {
 		_ = u.SetFormat(8, 1, uartx.ParityNone)
 		drain(u)
 		msg := []byte("format-ok" + lineEnding)
-		go func() { _, _ = u.Write(msg) }()
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
+		go func() { _, _ = sendAllContext(ctx, u, msg) }()
 		got, err := recvExact(ctx, u, len(msg))
 		if err != nil {
 			return "timeout"

@@ -16,16 +16,20 @@ const deviceName = rp.Device
 var (
 	UART0  = &_UART0
 	_UART0 = UART{
-		Buffer: machine.NewRingBuffer(),
-		Bus:    rp.UART0,
-		notify: make(chan struct{}, 1),
+		Buffer:   machine.NewRingBuffer(),
+		Bus:      rp.UART0,
+		notify:   make(chan struct{}, 1),
+		TxBuffer: machine.NewRingBuffer(),
+		txNotify: make(chan struct{}, 1),
 	}
 
 	UART1  = &_UART1
 	_UART1 = UART{
-		Buffer: machine.NewRingBuffer(),
-		Bus:    rp.UART1,
-		notify: make(chan struct{}, 1),
+		Buffer:   machine.NewRingBuffer(),
+		Bus:      rp.UART1,
+		notify:   make(chan struct{}, 1),
+		TxBuffer: machine.NewRingBuffer(),
+		txNotify: make(chan struct{}, 1),
 	}
 )
 

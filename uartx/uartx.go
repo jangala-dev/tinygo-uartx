@@ -27,21 +27,7 @@ const (
 	ParityOdd
 )
 
-// To implement the UART interface for a board, you must declare a concrete type as follows:
-//
-// 		type UART struct {
-// 			Buffer *RingBuffer
-// 		}
-//
-// You can also add additional members to this struct depending on your implementation,
-// but the *RingBuffer is required.
-// When you are declaring your UARTs for your board, make sure that you also declare the
-// RingBuffer using the NewRingBuffer() function when you declare your UART:
-//
-//		UART{Buffer: NewRingBuffer()}
-//
-
-// Read from the RX buffer.
+// Read from the RX buffer (non-blocking).
 func (uart *UART) Read(data []byte) (n int, err error) {
 	// check if RX buffer is empty
 	size := uart.Buffered()
@@ -63,28 +49,35 @@ func (uart *UART) Read(data []byte) (n int, err error) {
 	return size, nil
 }
 
-// WriteByte writes a byte of data over the UART's Tx.
-// This function blocks until the data is finished being sent.
+// WriteByte writes a single byte and blocks until FIFO has drained (event-driven).
 func (uart *UART) WriteByte(c byte) error {
-	err := uart.writeByte(c)
-	if err != nil {
-		return err
-	}
-	uart.flush() // flush() blocks until all data has been transmitted.
-	return nil
+	_, err := uart.Write([]byte{c})
+	return err
 }
 
-// Write data over the UART's Tx.
-// This function blocks until the data is finished being sent.
-func (uart *UART) Write(data []byte) (n int, err error) {
-	for i, v := range data {
-		err = uart.writeByte(v)
-		if err != nil {
-			return i, err
+// Write writes all bytes and blocks until the software buffer is empty and the TX FIFO is empty.
+// Implemented using IRQ-driven SendSome and readiness notifications; no polling.
+func (uart *UART) Write(p []byte) (int, error) {
+	sent := 0
+	for sent < len(p) {
+		n := uart.SendSome(p[sent:])
+		if n > 0 {
+			sent += n
+			continue
 		}
+		// Wait for TX progress (space or drain) then retry.
+		<-uart.txNotify
 	}
-	uart.flush() // flush() blocks until all data has been transmitted.
-	return len(data), nil
+
+	// Drain to TX FIFO empty.
+	for {
+		// Fast path: all enqueued and FIFO empty => done.
+		if uart.TxBuffer.Used() == 0 && uart.txFifoEmpty() {
+			return sent, nil
+		}
+		// Wait for ISR to signal progress (space made / FIFO transitioned).
+		<-uart.txNotify
+	}
 }
 
 // ReadByte reads a single byte from the RX buffer.
