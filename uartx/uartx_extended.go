@@ -72,7 +72,7 @@ func (uart *UART) WaitWritableContext(ctx context.Context) error {
 	for {
 		// If the HW FIFO is not full, callers can make progress (either write
 		// directly into FIFO or the ISR can drain SW buffer to create space).
-		if !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
+		if !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) || uart.TxBuffer.Used() < uart.TxBuffer.Size() {
 			return nil
 		}
 		select {

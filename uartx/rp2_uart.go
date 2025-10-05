@@ -5,6 +5,7 @@ package uartx
 
 import (
 	"device/rp"
+	"errors"
 	"machine"
 	"runtime/interrupt"
 )
@@ -12,10 +13,10 @@ import (
 // UART on the RP2040.
 type UART struct {
 	// RX
-	Buffer *machine.RingBuffer
+	Buffer *RingBuffer
 	Bus    *rp.UART0_Type
 	// TX
-	TxBuffer *machine.RingBuffer
+	TxBuffer *RingBuffer
 	txNotify chan struct{} // TX space/drain readiness
 
 	Interrupt interrupt.Interrupt
@@ -60,6 +61,8 @@ func (uart *UART) Configure(cfg machine.UARTConfig) error {
 	for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_RXFE) {
 		_ = uart.Bus.UARTDR.Get() // discard any stale byte
 	}
+	// Clear sticky RX errors (ECR share-address via RSR)
+	uart.Bus.UARTRSR.Set(0)
 
 	// 5) Enable UART and flow control (only if both pins are valid).
 	settings := uint32(rp.UART0_UARTCR_UARTEN | rp.UART0_UARTCR_RXE | rp.UART0_UARTCR_TXE)
@@ -107,30 +110,32 @@ func (uart *UART) SetBaudRate(br uint32) {
 
 	// PL011 needs a (dummy) line control register write.
 	// See https://github.com/raspberrypi/pico-sdk/blob/master/src/rp2_common/hardware_uart/uart.c#L93-L95
-	uart.Bus.UARTLCR_H.SetBits(0)
+	uart.Bus.UARTLCR_H.Set(uart.Bus.UARTLCR_H.Get())
 }
 
 // SetFormat for number of data bits, stop bits, and parity for the UART.
 func (uart *UART) SetFormat(databits, stopbits uint8, parity UARTParity) error {
-	var pen, pev, fen uint8
+	if databits < 5 || databits > 8 {
+		return errors.New("invalid databits")
+	}
+	if stopbits != 1 && stopbits != 2 {
+		return errors.New("invalid stopbits")
+	}
+
+	var pen, pev uint32
 	if parity != ParityNone {
 		pen = rp.UART0_UARTLCR_H_PEN
+		if parity == ParityEven {
+			pev = rp.UART0_UARTLCR_H_EPS
+		}
 	}
-	if parity == ParityEven {
-		pev = rp.UART0_UARTLCR_H_EPS
-	}
-	uart.Bus.UARTLCR_H.SetBits(uint32((databits-5)<<rp.UART0_UARTLCR_H_WLEN_Pos |
-		(stopbits-1)<<rp.UART0_UARTLCR_H_STP2_Pos |
-		pen | pev))
+	const fen = rp.UART0_UARTLCR_H_FEN
 
-	// Enable hardware FIFOs (32-entry TX/RX) so IRQ thresholds and TXFE/RXFE behave as expected.
-	fen = rp.UART0_UARTLCR_H_FEN
+	val := uint32((databits-5)<<rp.UART0_UARTLCR_H_WLEN_Pos|
+		(stopbits-1)<<rp.UART0_UARTLCR_H_STP2_Pos) |
+		pen | pev | fen
 
-	uart.Bus.UARTLCR_H.SetBits(uint32(
-		(databits-5)<<rp.UART0_UARTLCR_H_WLEN_Pos |
-			(stopbits-1)<<rp.UART0_UARTLCR_H_STP2_Pos |
-			pen | pev | fen))
-
+	uart.Bus.UARTLCR_H.Set(val) // full write, not OR
 	return nil
 }
 
@@ -222,6 +227,8 @@ func (uart *UART) handleInterrupt(interrupt.Interrupt) {
 		}
 		// Clear RX level and RX timeout interrupts.
 		uart.Bus.UARTICR.Set(rp.UART0_UARTICR_RXIC | rp.UART0_UARTICR_RTIC)
+		// Clear any accumulated RX error flags.
+		uart.Bus.UARTRSR.Set(0)
 		select {
 		case uart.notify <- struct{}{}:
 		default:

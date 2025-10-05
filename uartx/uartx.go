@@ -6,6 +6,7 @@ package uartx
 
 import (
 	"errors"
+	"time"
 )
 
 var errUARTBufferEmpty = errors.New("UART buffer empty")
@@ -42,8 +43,11 @@ func (uart *UART) Read(data []byte) (n int, err error) {
 
 	// only read number of bytes used from buffer
 	for i := 0; i < size; i++ {
-		v, _ := uart.ReadByte()
-		data[i] = v
+		if v, err := uart.ReadByte(); err == nil {
+			data[i] = v
+		} else {
+			return i, nil
+		}
 	}
 
 	return size, nil
@@ -71,12 +75,13 @@ func (uart *UART) Write(p []byte) (int, error) {
 
 	// Drain to TX FIFO empty.
 	for {
-		// Fast path: all enqueued and FIFO empty => done.
 		if uart.TxBuffer.Used() == 0 && uart.txFifoEmpty() {
 			return sent, nil
 		}
-		// Wait for ISR to signal progress (space made / FIFO transitioned).
-		<-uart.txNotify
+		select {
+		case <-uart.txNotify:
+		case <-time.After(time.Microsecond * 50):
+		}
 	}
 }
 

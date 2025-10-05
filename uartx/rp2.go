@@ -6,7 +6,6 @@ package uartx
 
 import (
 	"device/rp"
-	"machine"
 	"runtime/interrupt"
 )
 
@@ -16,19 +15,19 @@ const deviceName = rp.Device
 var (
 	UART0  = &_UART0
 	_UART0 = UART{
-		Buffer:   machine.NewRingBuffer(),
+		Buffer:   NewRingBuffer(),
 		Bus:      rp.UART0,
 		notify:   make(chan struct{}, 1),
-		TxBuffer: machine.NewRingBuffer(),
+		TxBuffer: NewRingBuffer(),
 		txNotify: make(chan struct{}, 1),
 	}
 
 	UART1  = &_UART1
 	_UART1 = UART{
-		Buffer:   machine.NewRingBuffer(),
+		Buffer:   NewRingBuffer(),
 		Bus:      rp.UART1,
 		notify:   make(chan struct{}, 1),
-		TxBuffer: machine.NewRingBuffer(),
+		TxBuffer: NewRingBuffer(),
 		txNotify: make(chan struct{}, 1),
 	}
 )
