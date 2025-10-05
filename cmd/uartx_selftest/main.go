@@ -10,7 +10,10 @@ import (
 	"github.com/jangala-dev/tinygo-uartx/uartx"
 )
 
-const (
+var (
+	u          = uartx.UART1
+	txPin      = 4
+	rxPin      = 5
 	baud       = 115200
 	lineEnding = "\r\n"
 )
@@ -74,15 +77,15 @@ func ledBlink(times int, on time.Duration) {
 
 func main() {
 	// Allow time to open the serial monitor
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
 	println("uartx self-test starting")
 
-	u := uartx.UART0
+	// u := uartx.UART0
 	err := u.Configure(uartx.UARTConfig{
-		BaudRate: baud,
-		TX:       uartx.UART0_TX_PIN,
-		RX:       uartx.UART0_RX_PIN,
+		BaudRate: uint32(baud),
+		TX:       machine.Pin(txPin),
+		RX:       machine.Pin(rxPin),
 	})
 	if err != nil {
 		println("Configure failed")
