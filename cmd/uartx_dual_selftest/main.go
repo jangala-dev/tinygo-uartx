@@ -10,7 +10,13 @@ import (
 	"github.com/jangala-dev/tinygo-uartx/uartx"
 )
 
-const baud = 115200
+const baud = 921600
+
+// Wiring required:
+//   UART0 TX -> UART1 RX
+//   UART1 TX -> UART0 RX
+//   UART1 TX -> UART0 RX
+// Flow control not used (RTS/CTS unconnected).
 
 func main() {
 	time.Sleep(3 * time.Second)
@@ -20,7 +26,7 @@ func main() {
 	u1 := uartx.UART1
 
 	_ = u0.Configure(uartx.UARTConfig{BaudRate: baud, TX: uartx.UART0_TX_PIN, RX: uartx.UART0_RX_PIN})
-	_ = u1.Configure(uartx.UARTConfig{BaudRate: baud, TX: uartx.UART1_TX_PIN, RX: uartx.UART1_RX_PIN})
+	_ = u1.Configure(uartx.UARTConfig{BaudRate: baud, TX: machine.Pin(4), RX: machine.Pin(5)})
 
 	machine.LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	drain(u0)
@@ -61,11 +67,15 @@ func main() {
 		msg := []byte("hello from U0\r\n")
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		go func() { _, _ = sendAllContext(ctx, u0, msg) }()
+
+		done := make(chan struct{}, 1)
+		go func() { _, _ = sendAllContext(ctx, u0, msg); done <- struct{}{} }()
+
 		got, err := recvExact(ctx, u1, len(msg))
 		if err != nil || string(got) != string(msg) {
 			return "mismatch/timeout"
 		}
+		<-done
 		return ""
 	})
 
@@ -75,11 +85,15 @@ func main() {
 		msg := []byte("hi from U1\r\n")
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		go func() { _, _ = sendAllContext(ctx, u1, msg) }()
+
+		done := make(chan struct{}, 1)
+		go func() { _, _ = sendAllContext(ctx, u1, msg); done <- struct{}{} }()
+
 		got, err := recvExact(ctx, u0, len(msg))
 		if err != nil || string(got) != string(msg) {
 			return "mismatch/timeout"
 		}
+		<-done
 		return ""
 	})
 
@@ -90,8 +104,10 @@ func main() {
 		n := 4 * 1024
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
+
 		done := make(chan struct{}, 1)
 		go func() { _ = sendPatternContext(ctx, u0, patternA, n); done <- struct{}{} }()
+
 		got := sha1.New()
 		if err := recvStream(ctx, u1, n, got); err != nil {
 			return "timeout/short read"
@@ -109,8 +125,10 @@ func main() {
 		n := 4 * 1024
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
+
 		done := make(chan struct{}, 1)
 		go func() { _ = sendPatternContext(ctx, u1, patternB, n); done <- struct{}{} }()
+
 		got := sha1.New()
 		if err := recvStream(ctx, u0, n, got); err != nil {
 			return "timeout/short read"
@@ -132,7 +150,7 @@ func main() {
 
 		errCh := make(chan string, 2)
 
-		// Receivers first
+		// Receivers first (each validates its own hash)
 		go func() {
 			h := sha1.New()
 			if err := recvStream(ctx, u1, n, h); err != nil {
@@ -172,7 +190,7 @@ func main() {
 		return ""
 	})
 
-	// Throughput 32 KiB each way: receive both directions concurrently
+	// Throughput 32 KiB each way: measure per direction independently.
 	run("Throughput: 32KiB each way (streamed)", func() string {
 		drain(u0)
 		drain(u1)
@@ -180,43 +198,47 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// Receivers (concurrent)
-		rcvDone := make(chan string, 2)
-		go func() {
-			if err := recvStream(ctx, u1, n, nil); err != nil {
-				rcvDone <- "U0->U1 timeout"
-				return
+		type result struct {
+			label string
+			ms    int
+			err   string
+		}
+		rcv := func(label string, rx *uartx.UART, n int) result {
+			start := time.Now()
+			err := recvStream(ctx, rx, n, nil)
+			elapsed := time.Since(start)
+			if err != nil {
+				return result{label: label, err: "timeout"}
 			}
-			rcvDone <- ""
-		}()
-		go func() {
-			if err := recvStream(ctx, u0, n, nil); err != nil {
-				rcvDone <- "U1->U0 timeout"
-				return
+			ms := int(elapsed / time.Millisecond)
+			if ms <= 0 {
+				ms = 1
 			}
-			rcvDone <- ""
-		}()
+			return result{label: label, ms: ms}
+		}
 
-		// Senders
-		start := time.Now()
+		// Start receivers
+		resCh := make(chan result, 2)
+		go func() { resCh <- rcv("U0->U1", u1, n) }()
+		go func() { resCh <- rcv("U1->U0", u0, n) }()
+
+		// Start senders
 		go func() { _ = sendPatternContext(ctx, u0, patternA, n) }()
 		go func() { _ = sendPatternContext(ctx, u1, patternB, n) }()
 
-		e1, e2 := <-rcvDone, <-rcvDone
-		elapsed := time.Since(start)
-		if e1 != "" || e2 != "" {
-			if e1 != "" {
-				return e1
+		r1, r2 := <-resCh, <-resCh
+		if r1.err != "" || r2.err != "" {
+			if r1.err != "" {
+				return r1.label + " " + r1.err
 			}
-			return e2
+			return r2.label + " " + r2.err
 		}
 
-		ms := int(elapsed / time.Millisecond)
-		if ms <= 0 {
-			ms = 1
-		}
-		kbpsX100 := (n*8*100 + ms/2) / ms
-		println("  U0->U1 =", formatFixed2(kbpsX100), "kbps   U1->U0 =", formatFixed2(kbpsX100), "kbps")
+		// Compute per-direction kbps (to two decimals), printed without fmt.
+		kbps1x100 := (n*8*100 + r1.ms/2) / r1.ms
+		kbps2x100 := (n*8*100 + r2.ms/2) / r2.ms
+		println("  ", r1.label, "=", formatFixed2(kbps1x100), "kbps   ",
+			r2.label, "=", formatFixed2(kbps2x100), "kbps")
 		return ""
 	})
 
@@ -226,12 +248,15 @@ func main() {
 
 /*** helpers (no fmt) ***/
 
+// drain empties the software RX buffer completely.
+// It does not block because ReadByte returns an error when empty.
 func drain(u *uartx.UART) {
 	for u.Buffered() > 0 {
 		_, _ = u.ReadByte()
 	}
 }
 
+// sendAllContext queues all bytes using SendSome and blocks only on Writable() or ctx.
 func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 	sent := 0
 	for sent < len(p) {
@@ -241,6 +266,7 @@ func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 		}
 		select {
 		case <-u.Writable():
+			// retry
 		case <-ctx.Done():
 			return sent, ctx.Err()
 		}
@@ -248,6 +274,7 @@ func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 	return sent, nil
 }
 
+// sendPatternContext generates and sends n bytes using gen, without busy-waiting.
 func sendPatternContext(ctx context.Context, u *uartx.UART, gen func(i int) byte, n int) error {
 	const chunk = 128
 	var buf [chunk]byte
@@ -268,40 +295,45 @@ func sendPatternContext(ctx context.Context, u *uartx.UART, gen func(i int) byte
 	return nil
 }
 
+// recvExact reads exactly n bytes. Cancellation relies solely on ctx; no busy loop.
 func recvExact(ctx context.Context, u *uartx.UART, n int) ([]byte, error) {
 	out := make([]byte, 0, n)
 	var tmp [128]byte
 	for len(out) < n {
-		select {
-		case <-ctx.Done():
-			return out, ctx.Err()
-		default:
-			if k, _ := u.RecvSomeContext(ctx, tmp[:]); k > 0 {
-				out = append(out, tmp[:k]...)
-			}
+		k := n - len(out)
+		if k > len(tmp) {
+			k = len(tmp)
+		}
+		m, err := u.RecvSomeContext(ctx, tmp[:k])
+		if err != nil {
+			return out, err
+		}
+		if m > 0 {
+			out = append(out, tmp[:m]...)
 		}
 	}
 	return out, nil
 }
 
+// recvStream reads n bytes and optionally writes them to sink.
+// Uses RecvSomeContext directly; no default-branch spinning.
 func recvStream(ctx context.Context, u *uartx.UART, n int, sink interface{ Write([]byte) (int, error) }) error {
 	var tmp [256]byte
 	rem := n
 	for rem > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			k := rem
-			if k > len(tmp) {
-				k = len(tmp)
+		k := rem
+		if k > len(tmp) {
+			k = len(tmp)
+		}
+		m, err := u.RecvSomeContext(ctx, tmp[:k])
+		if err != nil {
+			return err
+		}
+		if m > 0 {
+			if sink != nil {
+				_, _ = sink.Write(tmp[:m])
 			}
-			if m, _ := u.RecvSomeContext(ctx, tmp[:k]); m > 0 {
-				if sink != nil {
-					_, _ = sink.Write(tmp[:m])
-				}
-				rem -= m
-			}
+			rem -= m
 		}
 	}
 	return nil
@@ -348,6 +380,8 @@ func blink(pin machine.Pin, times int, on time.Duration) {
 		time.Sleep(on)
 	}
 }
+
+/*** no-fmt integer formatting utilities ***/
 
 func itoa(n int) string {
 	if n == 0 {

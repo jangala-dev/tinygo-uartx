@@ -10,17 +10,9 @@ import (
 /*
 RP2040 PL011 diagnostic (UART0 <-> UART1 on Pico)
 
-- Configurable baud and IFLS watermarks
-- FIFOs enabled (LCR_H.FEN), 8N1
-- RXIM and RTIM enabled
-- ISR drains RX FIFO, captures per-byte error flags, counts IRQ causes
-- Larger RX ring (16 KiB) with overflow (drop) accounting
-- One-way 4 KiB tests and full-duplex 8 KiB, with incremental SHA-1
-- Correct 'baud.actual' from divisors (scaled 64-bit arithmetic)
-- Polling sanity read (with RX IRQs temporarily disabled)
 Wiring assumed:
-  UART0 TX (GP0) -> UART1 RX (GP5)
-  UART1 TX (GP4) -> UART0 RX (GP1)
+  UART0 TX (GP0) -> UART1 RX (GP9)
+  UART1 TX (GP8) -> UART0 RX (GP1)
 */
 
 // ---------- Tunables ----------

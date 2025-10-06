@@ -188,25 +188,38 @@ func (uart *UART) enqueueTX(p []byte) int {
 	return i
 }
 
-// SendSome tries to enqueue up to len(p) bytes, non-blocking.
-// Returns the number of bytes accepted into the HW FIFO and/or software TX buffer.
+// helper
+func (uart *UART) txIRQEnabled() bool {
+	return uart.Bus.UARTIMSC.HasBits(rp.UART0_UARTIMSC_TXIM)
+}
+
+// SendSome tries to accept bytes without blocking.
+// Foreground may write to HW FIFO only when TX IRQ is disabled (kick start).
 func (uart *UART) SendSome(p []byte) int {
 	if len(p) == 0 {
 		return 0
 	}
-	// First, opportunistically push into HW FIFO.
-	n := uart.tryWriteHW(p)
-	if n > 0 {
-		uart.enableTxIRQ() // ensure we get TX IRQs as FIFO drains
-		return n
+
+	sent := 0
+
+	// If TX IRQ is currently disabled, we own the initial kick.
+	if !uart.txIRQEnabled() {
+		n := uart.tryWriteHW(p) // push directly to FIFO
+		sent += n
+		p = p[n:]
 	}
-	// Next, enqueue into software buffer.
-	m := uart.enqueueTX(p)
-	if m > 0 {
-		uart.enableTxIRQ()
-		return m
+
+	// Enqueue the remainder into the software buffer.
+	if len(p) > 0 {
+		m := uart.enqueueTX(p)
+		if m > 0 {
+			sent += m
+			// Hand over to ISR to drain the SW buffer and continue.
+			uart.enableTxIRQ()
+		}
 	}
-	return 0
+
+	return sent
 }
 
 // --- RX/TX ISR ---

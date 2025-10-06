@@ -12,9 +12,9 @@ import (
 
 var (
 	u          = uartx.UART1
-	txPin      = 4
-	rxPin      = 5
-	baud       = 115200
+	txPin      = uartx.UART1_TX_PIN
+	rxPin      = uartx.UART1_RX_PIN
+	baud       = 921600
 	lineEnding = "\r\n"
 )
 
