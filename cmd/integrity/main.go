@@ -18,11 +18,11 @@ import (
 
 /*** Tunables ***/
 const (
-	baud           = 460800    // UART baudrate
-	totalBytes     = 64 * 1024 // bytes per direction for integrity run(s)
-	fullDuplex     = true      // true: duplex test; false: run each direction separately
+	baud           = 115200 * 8 // UART baudrate
+	totalBytes     = 64 * 1024  // bytes per direction for integrity run(s)
+	fullDuplex     = true       // true: duplex test; false: run each direction separately
 	timeoutPerTest = 10 * time.Second
-	warmupDelay    = 2 * time.Second // initial delay before starting tests
+	warmupDelay    = 3 * time.Second // initial delay before starting tests
 
 	// Mitigation for first-byte artefact:
 	usePreamble  = true // send a preamble byte and have receivers skip it before verifying

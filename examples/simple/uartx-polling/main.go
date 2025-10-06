@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	uart = uartx.UART0
-	tx   = uartx.UART0_TX_PIN // Pico: GP8
-	rx   = uartx.UART0_RX_PIN // Pico: GP9
+	uart = uartx.UART1
+	tx   = uartx.UART1_TX_PIN // Pico: GP8
+	rx   = uartx.UART1_RX_PIN // Pico: GP9
 )
 
 func main() {

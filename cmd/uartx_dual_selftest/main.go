@@ -15,7 +15,6 @@ const baud = 921600
 // Wiring required:
 //   UART0 TX -> UART1 RX
 //   UART1 TX -> UART0 RX
-//   UART1 TX -> UART0 RX
 // Flow control not used (RTS/CTS unconnected).
 
 func main() {

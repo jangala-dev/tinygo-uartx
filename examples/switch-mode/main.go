@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	uart = uartx.UART0
-	tx   = uartx.UART0_TX_PIN // Pico: GP0
-	rx   = uartx.UART0_RX_PIN // Pico: GP1
+	uart = uartx.UART1
+	tx   = uartx.UART1_TX_PIN // Pico: GP8
+	rx   = uartx.UART1_RX_PIN // Pico: GP9
 
 	cfgMu sync.Mutex
 )

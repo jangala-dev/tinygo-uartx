@@ -8,9 +8,9 @@ import (
 )
 
 var (
-	uart = machine.UART0
-	tx   = machine.UART0_TX_PIN // Pico: GP8
-	rx   = machine.UART0_RX_PIN // Pico: GP9
+	uart = machine.UART1
+	tx   = machine.UART1_TX_PIN // Pico: GP8
+	rx   = machine.UART1_RX_PIN // Pico: GP9
 )
 
 func main() {

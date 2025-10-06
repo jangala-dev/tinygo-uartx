@@ -10,8 +10,7 @@ import (
 )
 
 var (
-	uart0 = uartx.UART0
-	uart1 = uartx.UART1
+	uart = uartx.UART1
 )
 
 func main() {
@@ -20,24 +19,14 @@ func main() {
 	led.Configure(machine.PinConfig{Mode: machine.PinOutput})
 
 	// Configure UART0 at 115200 on explicit pins.
-	if err := uart0.Configure(uartx.UARTConfig{
+	if err := uart.Configure(uartx.UARTConfig{
 		BaudRate: 115200,
-		TX:       uartx.UART0_TX_PIN,
-		RX:       uartx.UART0_RX_PIN,
+		TX:       uartx.UART1_TX_PIN,
+		RX:       uartx.UART1_RX_PIN,
 	}); err != nil {
-		println("uart0 configure error")
+		println("uart configure error")
 		halt()
 	}
-
-	// // Configure UART1 at 115200 on explicit pins.
-	// if err := uart1.Configure(uartx.UARTConfig{
-	// 	BaudRate: 115200,
-	// 	TX:       uartx.UART1_TX_PIN,
-	// 	RX:       uartx.UART1_RX_PIN,
-	// }); err != nil {
-	// 	println("uart0 configure error")
-	// 	halt()
-	// }
 
 	// 1) Writer: send "ping N\r\n" periodically over UART1.
 	go func() {
@@ -58,7 +47,7 @@ func main() {
 		// Drain any bytes already present before first wait.
 		drain(buf)
 
-		for range uart0.Readable() {
+		for range uart.Readable() {
 			// Coalesced wake: drain until empty.
 			drain(buf)
 		}
@@ -79,7 +68,7 @@ func main() {
 
 func drain(buf []byte) {
 	for {
-		if n, _ := uart0.Read(buf); n > 0 {
+		if n, _ := uart.Read(buf); n > 0 {
 			_, _ = machine.Serial.Write(buf[:n]) // appears in -monitor
 			continue
 		}
@@ -90,7 +79,7 @@ func drain(buf []byte) {
 // --- helpers (no fmt) ---
 
 func uartWriteString(s string) {
-	_, _ = uart0.Write([]byte(s))
+	_, _ = uart.Write([]byte(s))
 }
 
 func uartWriteInt(n int) {
@@ -105,7 +94,7 @@ func uartWriteInt(n int) {
 		buf[i] = byte('0' + (n % 10))
 		n /= 10
 	}
-	_, _ = uart0.Write(buf[i:])
+	_, _ = uart.Write(buf[i:])
 }
 
 func halt() {
