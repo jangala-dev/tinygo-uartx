@@ -164,7 +164,7 @@ func main() {
 		select {
 		case <-u.Readable():
 			for {
-				n, _ := u.TryRead(rxbuf[:])
+				n := u.TryRead(rxbuf[:])
 				if n == 0 {
 					break
 				}

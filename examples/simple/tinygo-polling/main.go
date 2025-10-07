@@ -46,7 +46,7 @@ func main() {
 		for {
 			if uart.Buffered() > 0 {
 				// Read is non-blocking; returns (0, nil) if nothing available.
-				if n, _ := uart.TryRead(buf); n > 0 {
+				if n, _ := uart.Read(buf); n > 0 {
 					machine.Serial.Write(buf[:n]) // appears in `-monitor`
 				}
 			}
