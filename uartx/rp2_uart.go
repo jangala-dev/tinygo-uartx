@@ -288,6 +288,9 @@ func (uart *UART) handleInterrupt(interrupt.Interrupt) {
 
 	// RX path (RX level or RX timeout).
 	if (mis & (rp.UART0_UARTMIS_RXMIS | rp.UART0_UARTMIS_RTMIS)) != 0 {
+
+		// In the ISR, only notify if at least one byte was enqueued.
+		enq := 0
 		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_RXFE) {
 			r := uart.Bus.UARTDR.Get()
 			if (r & (rp.UART0_UARTDR_OE | rp.UART0_UARTDR_BE |
@@ -295,21 +298,29 @@ func (uart *UART) handleInterrupt(interrupt.Interrupt) {
 				// Drop errored byte; reading DR clears the per-byte error flags.
 				continue
 			}
-			uart.Receive(byte(r & 0xFF))
+			if uart.Buffer.Put(byte(r & 0xFF)) {
+				enq++
+			} else {
+				// optional rxDrops++
+			}
 		}
+
 		// Clear RX level and RX timeout sources, then sticky errors.
 		uart.Bus.UARTICR.Set(rp.UART0_UARTICR_RXIC | rp.UART0_UARTICR_RTIC)
 		uart.Bus.UARTRSR.Set(0)
 
 		// Coalesce a Readable notification.
-		select {
-		case uart.notify <- struct{}{}:
-		default:
+		if enq > 0 {
+			select {
+			case uart.notify <- struct{}{}:
+			default:
+			}
 		}
 	}
 
 	// TX path (TX level).
 	if mis&rp.UART0_UARTMIS_TXMIS != 0 {
+
 		// Move bytes from SW buffer to HW FIFO.
 		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
 			b, ok := uart.TxBuffer.Get()
