@@ -188,35 +188,51 @@ func (uart *UART) enqueueTX(p []byte) int {
 	return i
 }
 
-// helper
-func (uart *UART) txIRQEnabled() bool {
-	return uart.Bus.UARTIMSC.HasBits(rp.UART0_UARTIMSC_TXIM)
-}
-
 // SendSome tries to accept bytes without blocking.
-// Foreground may write to HW FIFO only when TX IRQ is disabled (kick start).
+// Foreground writes to UARTDR only when:
+//   - TXIM is masked (we own the kick), or
+//   - TXIM is enabled but there is no pending TX IRQ and FIFO is empty,
+//     in which case we briefly mask, seed FIFO, then re-enable TXIM.
+//
+// Steady-state: ISR is the sole writer to UARTDR.
 func (uart *UART) SendSome(p []byte) int {
 	if len(p) == 0 {
 		return 0
 	}
-
 	sent := 0
 
-	// If TX IRQ is currently disabled, we own the initial kick.
-	if !uart.txIRQEnabled() {
-		n := uart.tryWriteHW(p) // push directly to FIFO
-		sent += n
-		p = p[n:]
+	const (
+		bTXIM  = uint32(rp.UART0_UARTIMSC_TXIM)
+		fTXFF  = uint32(rp.UART0_UARTFR_TXFF)
+		fTXFE  = uint32(rp.UART0_UARTFR_TXFE)
+		mTXMIS = uint32(rp.UART0_UARTMIS_TXMIS)
+	)
+
+	// Case A: TXIM masked — foreground owns the initial kick.
+	if !uart.Bus.UARTIMSC.HasBits(bTXIM) {
+		for sent < len(p) && !uart.Bus.UARTFR.HasBits(fTXFF) {
+			uart.Bus.UARTDR.Set(uint32(p[sent]))
+			sent++
+		}
+		uart.Bus.UARTIMSC.SetBits(bTXIM) // arm TX IRQs; ISR takes over
+	} else {
+		// Case B: TXIM enabled. If FIFO is empty and no TX IRQ is pending,
+		// briefly mask, seed FIFO, then re-enable TXIM to create a level transition.
+		if uart.Bus.UARTFR.HasBits(fTXFE) && !uart.Bus.UARTMIS.HasBits(mTXMIS) {
+			uart.Bus.UARTIMSC.ClearBits(bTXIM) // prevent ISR/foreground interleave
+			for sent < len(p) && !uart.Bus.UARTFR.HasBits(fTXFF) {
+				uart.Bus.UARTDR.Set(uint32(p[sent]))
+				sent++
+			}
+			uart.Bus.UARTIMSC.SetBits(bTXIM)
+		}
 	}
 
-	// Enqueue the remainder into the software buffer.
-	if len(p) > 0 {
-		m := uart.enqueueTX(p)
-		if m > 0 {
-			sent += m
-			// Hand over to ISR to drain the SW buffer and continue.
-			uart.enableTxIRQ()
-		}
+	// Enqueue any remainder for ISR to drain.
+	if sent < len(p) {
+		sent += uart.enqueueTX(p[sent:])
+		// ensure TX IRQs are armed if we enqueued and they were masked
+		uart.enableTxIRQ()
 	}
 
 	return sent
@@ -273,9 +289,9 @@ func (uart *UART) handleInterrupt(interrupt.Interrupt) {
 				case uart.txNotify <- struct{}{}:
 				default:
 				}
+				// Disable TX IRQ until more data is queued.
+				uart.Bus.UARTIMSC.ClearBits(rp.UART0_UARTIMSC_TXIM)
 			}
-			// Disable TX IRQ until more data is queued.
-			uart.Bus.UARTIMSC.ClearBits(rp.UART0_UARTIMSC_TXIM)
 		}
 
 		// Clear TX interrupt.
