@@ -68,7 +68,7 @@ func main() {
 
 func drain(buf []byte) {
 	for {
-		if n, _ := uart.Read(buf); n > 0 {
+		if n := uart.TryRead(buf); n > 0 {
 			_, _ = machine.Serial.Write(buf[:n]) // appears in -monitor
 			continue
 		}

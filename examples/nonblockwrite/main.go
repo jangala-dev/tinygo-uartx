@@ -164,7 +164,7 @@ func main() {
 		select {
 		case <-u.Readable():
 			for {
-				n, _ := u.Read(rxbuf[:])
+				n, _ := u.TryRead(rxbuf[:])
 				if n == 0 {
 					break
 				}
@@ -211,7 +211,7 @@ func main() {
 
 		case <-u.Writable():
 			if len(pendingTx) > 0 {
-				n := u.SendSome(pendingTx)
+				n := u.TryWrite(pendingTx)
 				pendingTx = pendingTx[n:]
 			}
 			if len(pendingTx) == 0 {
@@ -219,7 +219,7 @@ func main() {
 				nextPayloadIdx++
 				pushInflight(&inflight, len(pl), time.Now())
 				pendingTx = append(pendingTx[:0], pl...)
-				n := u.SendSome(pendingTx)
+				n := u.TryWrite(pendingTx)
 				pendingTx = pendingTx[n:]
 			}
 
@@ -229,7 +229,7 @@ func main() {
 		// 		nextPayloadIdx++
 		// 		pushInflight(&inflight, len(pl), time.Now())
 		// 		pendingTx = append(pendingTx[:0], pl...)
-		// 		n := u.SendSome(pendingTx)
+		// 		n := u.TryWrite(pendingTx)
 		// 		pendingTx = pendingTx[n:]
 		// 	}
 

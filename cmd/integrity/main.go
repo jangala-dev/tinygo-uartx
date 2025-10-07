@@ -32,8 +32,8 @@ const (
 	guardDelay = 2 * time.Millisecond
 
 	// I/O chunking and diagnostics:
-	sendChunk      = 192 // bytes per SendSome burst
-	recvChunk      = 256 // bytes per RecvSome read
+	sendChunk      = 192 // bytes per TryWrite burst
+	recvChunk      = 256 // bytes per TryRead burst
 	contextRadius  = 16  // surrounding bytes shown on mismatch (before/after pivot)
 	extraFollowing = 128 // additional bytes to read and print after the first mismatch
 )
@@ -49,7 +49,7 @@ func main() {
 	println("baud =", baud, "  bytes/dir =", totalBytes, "  duplex =", boolToStr(fullDuplex))
 	println("U0 TX/RX = 0/1  U1 TX/RX = 4/5")
 
-	// Hold RX high before remux to UART to ensure idle-high on the line (optional but harmless).
+	// Hold RX high before remux to UART to ensure idle-high on the line (optional).
 	machine.Pin(1).Configure(machine.PinConfig{Mode: machine.PinInputPullup})
 	machine.Pin(5).Configure(machine.PinConfig{Mode: machine.PinInputPullup})
 
@@ -167,18 +167,22 @@ func runFullDuplex(n int, u0, u1 *uartx.UART) string {
 	return ""
 }
 
-/*** Library-aligned helpers ***/
+/*** Helpers using the new uartx API ***/
 
 func drain(u *uartx.UART) {
-	for u.Buffered() > 0 {
-		_, _ = u.ReadByte()
+	var tmp [64]byte
+	for {
+		n := u.TryRead(tmp[:])
+		if n == 0 {
+			return
+		}
 	}
 }
 
 func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 	sent := 0
 	for sent < len(p) {
-		if n := u.SendSome(p[sent:]); n > 0 {
+		if n := u.TryWrite(p[sent:]); n > 0 {
 			sent += n
 			continue
 		}
@@ -212,10 +216,31 @@ func sendPatternContext(ctx context.Context, u *uartx.UART, gen func(int) byte, 
 
 func sendOne(u *uartx.UART, b byte) {
 	for {
-		if n := u.SendSome([]byte{b}); n == 1 {
+		if n := u.TryWrite([]byte{b}); n == 1 {
 			return
 		}
 		<-u.Writable()
+	}
+}
+
+// recvSomeContext reads up to len(p) bytes using TryRead and Readable()
+// and returns when at least one byte is obtained or the context is done.
+func recvSomeContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if n := u.TryRead(p); n > 0 {
+		return n, nil
+	}
+	for {
+		select {
+		case <-u.Readable():
+			if n := u.TryRead(p); n > 0 {
+				return n, nil
+			}
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 	}
 }
 
@@ -228,7 +253,7 @@ func recvAndCheckStream(ctx context.Context, u *uartx.UART, gen func(int) byte, 
 	// Discard initial 'skip' bytes if requested.
 	for s := 0; s < skip; {
 		var t [1]byte
-		m, err := u.RecvSomeContext(ctx, t[:])
+		m, err := recvSomeContext(ctx, u, t[:])
 		if err != nil {
 			return "timeout (waiting to skip preamble)"
 		}
@@ -245,7 +270,7 @@ func recvAndCheckStream(ctx context.Context, u *uartx.UART, gen func(int) byte, 
 		if k > len(buf) {
 			k = len(buf)
 		}
-		m, err := u.RecvSomeContext(ctx, buf[:k])
+		m, err := recvSomeContext(ctx, u, buf[:k])
 		if err != nil {
 			return "timeout"
 		}
@@ -272,7 +297,7 @@ func recvAndCheckStream(ctx context.Context, u *uartx.UART, gen func(int) byte, 
 					if want > len(tmp) {
 						want = len(tmp)
 					}
-					mm, err2 := u.RecvSomeContext(ctx, tmp[:want])
+					mm, err2 := recvSomeContext(ctx, u, tmp[:want])
 					if err2 != nil {
 						break
 					}

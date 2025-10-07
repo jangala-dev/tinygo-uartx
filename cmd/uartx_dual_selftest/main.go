@@ -233,7 +233,7 @@ func main() {
 			return r2.label + " " + r2.err
 		}
 
-		// Compute per-direction kbps (to two decimals), printed without fmt.
+		// Compute per-direction kbps (two decimals), printed without fmt.
 		kbps1x100 := (n*8*100 + r1.ms/2) / r1.ms
 		kbps2x100 := (n*8*100 + r2.ms/2) / r2.ms
 		println("  ", r1.label, "=", formatFixed2(kbps1x100), "kbps   ",
@@ -247,19 +247,22 @@ func main() {
 
 /*** helpers (no fmt) ***/
 
-// drain empties the software RX buffer completely.
-// It does not block because ReadByte returns an error when empty.
+// drain empties the RX software buffer using TryRead.
 func drain(u *uartx.UART) {
-	for u.Buffered() > 0 {
-		_, _ = u.ReadByte()
+	var tmp [64]byte
+	for {
+		n := u.TryRead(tmp[:])
+		if n == 0 {
+			return
+		}
 	}
 }
 
-// sendAllContext queues all bytes using SendSome and blocks only on Writable() or ctx.
+// sendAllContext queues all bytes using TryWrite and blocks only on Writable() or ctx.
 func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 	sent := 0
 	for sent < len(p) {
-		if n := u.SendSome(p[sent:]); n > 0 {
+		if n := u.TryWrite(p[sent:]); n > 0 {
 			sent += n
 			continue
 		}
@@ -273,7 +276,7 @@ func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 	return sent, nil
 }
 
-// sendPatternContext generates and sends n bytes using gen, without busy-waiting.
+// sendPatternContext generates and sends n bytes using gen without busy-waiting.
 func sendPatternContext(ctx context.Context, u *uartx.UART, gen func(i int) byte, n int) error {
 	const chunk = 128
 	var buf [chunk]byte
@@ -294,7 +297,7 @@ func sendPatternContext(ctx context.Context, u *uartx.UART, gen func(i int) byte
 	return nil
 }
 
-// recvExact reads exactly n bytes. Cancellation relies solely on ctx; no busy loop.
+// recvExact reads exactly n bytes using TryRead+Readable (or returns ctx error).
 func recvExact(ctx context.Context, u *uartx.UART, n int) ([]byte, error) {
 	out := make([]byte, 0, n)
 	var tmp [128]byte
@@ -303,19 +306,21 @@ func recvExact(ctx context.Context, u *uartx.UART, n int) ([]byte, error) {
 		if k > len(tmp) {
 			k = len(tmp)
 		}
-		m, err := u.RecvSomeContext(ctx, tmp[:k])
-		if err != nil {
-			return out, err
-		}
-		if m > 0 {
+		if m := u.TryRead(tmp[:k]); m > 0 {
 			out = append(out, tmp[:m]...)
+			continue
+		}
+		select {
+		case <-u.Readable():
+		case <-ctx.Done():
+			return out, ctx.Err()
 		}
 	}
 	return out, nil
 }
 
 // recvStream reads n bytes and optionally writes them to sink.
-// Uses RecvSomeContext directly; no default-branch spinning.
+// It uses TryRead+Readable and honours ctx without spinning.
 func recvStream(ctx context.Context, u *uartx.UART, n int, sink interface{ Write([]byte) (int, error) }) error {
 	var tmp [256]byte
 	rem := n
@@ -324,15 +329,17 @@ func recvStream(ctx context.Context, u *uartx.UART, n int, sink interface{ Write
 		if k > len(tmp) {
 			k = len(tmp)
 		}
-		m, err := u.RecvSomeContext(ctx, tmp[:k])
-		if err != nil {
-			return err
-		}
-		if m > 0 {
+		if m := u.TryRead(tmp[:k]); m > 0 {
 			if sink != nil {
 				_, _ = sink.Write(tmp[:m])
 			}
 			rem -= m
+			continue
+		}
+		select {
+		case <-u.Readable():
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 	return nil

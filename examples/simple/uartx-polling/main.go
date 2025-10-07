@@ -47,7 +47,7 @@ func main() {
 		buf := make([]byte, 64)
 		for {
 			if uart.Buffered() > 0 {
-				if n, _ := uart.Read(buf); n > 0 {
+				if n, _ := uart.TryRead(buf); n > 0 {
 					_, _ = machine.Serial.Write(buf[:n])
 				}
 			}

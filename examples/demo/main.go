@@ -3,7 +3,6 @@
 package main
 
 import (
-	"context"
 	"time"
 
 	"machine"
@@ -35,7 +34,7 @@ func main() {
 	// Writer: produce loopback traffic for the demos.
 	go writer()
 
-	// Reader: rotate through demonstrations of each blocking method.
+	// Reader: rotate through demonstrations using the new API.
 	go demos()
 
 	// LED blinker.
@@ -55,108 +54,131 @@ func main() {
 
 func demos() {
 	for {
-		header("DEMO 1: Readable() + drain")
+		header("DEMO 1: Readable() + TryRead drain")
 		demoReadable(6 * time.Second)
 
-		header("DEMO 2: WaitReadableContext(ctx) + drain with 1s timeout")
+		header("DEMO 2: Readable() with 1s timeout + TryRead drain")
 		demoWaitReadable(6 * time.Second)
 
-		header("DEMO 3: RecvSomeContext(ctx, buf) with 1s timeout")
+		header("DEMO 3: Read-at-least-one with 1s timeout (Readable + TryRead)")
 		demoRecvSome(6 * time.Second)
 
-		header("DEMO 4: RecvByteContext(ctx) with 1s timeout")
+		header("DEMO 4: Read exactly one byte with 1s timeout (Readable + TryRead)")
 		demoRecvByte(6 * time.Second)
 	}
 }
 
-// DEMO 1: use the readiness channel and drain with non-blocking Read.
+// DEMO 1: wait on readiness and drain whatever is available using TryRead.
 func demoReadable(d time.Duration) {
 	buf := make([]byte, 64)
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		<-uart.Readable() // blocks until ISR signals
+		<-uart.Readable() // blocks until ISR signals RX data
 		// Coalesced wake; drain everything currently buffered.
 		for {
-			n, _ := uart.Read(buf)
+			n := uart.TryRead(buf)
 			if n == 0 {
 				break
 			}
 			log("readable: ")
 			log(itoa(n))
 			log(": ")
-			machine.Serial.Write(buf[:n])
+			_, _ = machine.Serial.Write(buf[:n])
 			logln("")
 		}
 	}
 }
 
-// DEMO 2: wait for readability with a context and then drain.
+// DEMO 2: use Readable() with an explicit timeout, then drain with TryRead.
 func demoWaitReadable(d time.Duration) {
 	buf := make([]byte, 64)
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		err := uart.WaitReadableContext(ctx)
-		cancel()
-		if err != nil {
-			logln("wait: timeout")
-			continue
-		}
-		for {
-			n, _ := uart.Read(buf)
-			if n == 0 {
-				break
+		select {
+		case <-uart.Readable():
+			for {
+				n := uart.TryRead(buf)
+				if n == 0 {
+					break
+				}
+				log("wait+drain: ")
+				log(itoa(n))
+				log(": ")
+				_, _ = machine.Serial.Write(buf[:n])
+				logln("")
 			}
-			log("wait+drain: ")
-			log(itoa(n))
-			log(": ")
-			machine.Serial.Write(buf[:n])
-			logln("")
+		case <-time.After(time.Second):
+			logln("wait: timeout")
 		}
 	}
 }
 
-// DEMO 3: read “some” bytes with a deadline; returns after ≥1 byte or timeout.
+// DEMO 3: read “some” bytes with a 1s timeout; returns after ≥1 byte or timeout.
+// Built from Readable() + TryRead (no context helpers).
 func demoRecvSome(d time.Duration) {
 	buf := make([]byte, 64)
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		n, err := uart.RecvSomeContext(ctx, buf)
-		cancel()
-		if err != nil {
-			logln("some: timeout")
+		// Try immediate read first.
+		if n := uart.TryRead(buf); n > 0 {
+			log("some: ")
+			log(itoa(n))
+			log(": ")
+			_, _ = machine.Serial.Write(buf[:n])
+			logln("")
 			continue
 		}
-		log("some: ")
-		log(itoa(n))
-		log(": ")
-		machine.Serial.Write(buf[:n])
-		logln("")
+		// Otherwise wait up to 1s for readiness.
+		select {
+		case <-uart.Readable():
+			n := uart.TryRead(buf)
+			if n == 0 {
+				// Spurious wake; try again on next loop.
+				continue
+			}
+			log("some: ")
+			log(itoa(n))
+			log(": ")
+			_, _ = machine.Serial.Write(buf[:n])
+			logln("")
+		case <-time.After(time.Second):
+			logln("some: timeout")
+		}
 	}
 }
 
-// DEMO 4: read a single byte with a deadline.
+// DEMO 4: read exactly one byte with a 1s deadline using Readable()+TryRead.
 func demoRecvByte(d time.Duration) {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		b, err := uart.RecvByteContext(ctx)
-		cancel()
-		if err != nil {
-			logln("byte: timeout")
+		// Try immediately.
+		var one [1]byte
+		if n := uart.TryRead(one[:]); n == 1 {
+			printByte(one[0])
 			continue
 		}
-		log("byte: 0x")
-		log(hex2(uint8(b)))
-		log(" '")
-		if b >= 32 && b <= 126 {
-			machine.Serial.Write([]byte{b})
-		} else {
-			log("?")
+		// Otherwise wait up to 1s, then try again.
+		select {
+		case <-uart.Readable():
+			if uart.TryRead(one[:]) == 1 {
+				printByte(one[0])
+			}
+		case <-time.After(time.Second):
+			logln("byte: timeout")
 		}
-		logln("'")
 	}
+}
+
+func printByte(b byte) {
+	log("byte: 0x")
+	log(hex2(uint8(b)))
+	log(" '")
+	if b >= 32 && b <= 126 {
+		_, _ = machine.Serial.Write([]byte{b})
+	} else {
+		log("?")
+	}
+	logln("'")
 }
 
 // --- traffic generator ---
@@ -169,13 +191,12 @@ func writer() {
 	for range t.C {
 		// Periodic line payload for “drain” and “some” demos.
 		line := []byte("ping " + itoa(n) + "\r\n")
-		_, _ = uart.Write(line)
+		_, _ = uart.Write(line) // Write blocks until accepted (no implicit flush)
 
 		// Single-byte marker for the byte demo.
 		if n%5 == 0 {
 			_ = uart.WriteByte('X')
 		}
-
 		n++
 	}
 }

@@ -115,7 +115,7 @@ func main() {
 func drain(buf []byte) {
 	for {
 		cfgMu.Lock()
-		n, _ := uart.Read(buf)
+		n := uart.TryRead(buf)
 		cfgMu.Unlock()
 		if n > 0 {
 			_, _ = machine.Serial.Write(buf[:n]) // appears in -monitor

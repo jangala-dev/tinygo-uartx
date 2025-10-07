@@ -11,22 +11,26 @@ import (
 
 const deviceName = rp.Device
 
-// UART on the RP2040
+// UART on the RP2040/RP2035
 var (
 	UART0  = &_UART0
 	_UART0 = UART{
-		Buffer:   NewRingBuffer(),
-		Bus:      rp.UART0,
-		notify:   make(chan struct{}, 1),
+		Bus: rp.UART0,
+		// RX
+		Buffer: NewRingBuffer(),
+		notify: make(chan struct{}, 1),
+		// TX
 		TxBuffer: NewRingBuffer(),
 		txNotify: make(chan struct{}, 1),
 	}
 
 	UART1  = &_UART1
 	_UART1 = UART{
-		Buffer:   NewRingBuffer(),
-		Bus:      rp.UART1,
-		notify:   make(chan struct{}, 1),
+		Bus: rp.UART1,
+		// RX
+		Buffer: NewRingBuffer(),
+		notify: make(chan struct{}, 1),
+		// TX
 		TxBuffer: NewRingBuffer(),
 		txNotify: make(chan struct{}, 1),
 	}

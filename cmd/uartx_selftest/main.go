@@ -18,31 +18,27 @@ var (
 	lineEnding = "\r\n"
 )
 
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
-
 func drain(u *uartx.UART) {
-	for u.Buffered() > 0 {
-		_, _ = u.ReadByte()
+	var tmp [64]byte
+	for {
+		n := u.TryRead(tmp[:])
+		if n == 0 {
+			return
+		}
 	}
 }
 
-// Event-driven TX: enqueue the entire slice using Writable()+SendSome.
-// Returns when all bytes are accepted, or ctx ends.
+// sendAllContext writes p using TryWrite+Writable with a context timeout.
+// It returns when all bytes are accepted by the driver or ctx ends.
 func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 	sent := 0
 	for sent < len(p) {
-		if n := u.SendSome(p[sent:]); n > 0 {
+		if n := u.TryWrite(p[sent:]); n > 0 {
 			sent += n
 			continue
 		}
 		select {
 		case <-u.Writable():
-			// space made; retry
 		case <-ctx.Done():
 			return sent, ctx.Err()
 		}
@@ -50,17 +46,19 @@ func sendAllContext(ctx context.Context, u *uartx.UART, p []byte) (int, error) {
 	return sent, nil
 }
 
+// recvExact reads exactly n bytes (or ctx error) using TryRead+Readable.
 func recvExact(ctx context.Context, u *uartx.UART, n int) ([]byte, error) {
 	out := make([]byte, 0, n)
-	tmp := make([]byte, 128)
+	var buf [128]byte
 	for len(out) < n {
+		if k := u.TryRead(buf[:]); k > 0 {
+			out = append(out, buf[:k]...)
+			continue
+		}
 		select {
+		case <-u.Readable():
 		case <-ctx.Done():
 			return out, ctx.Err()
-		default:
-			if k, _ := u.RecvSomeContext(ctx, tmp); k > 0 {
-				out = append(out, tmp[:k]...)
-			}
 		}
 	}
 	return out, nil
@@ -76,18 +74,16 @@ func ledBlink(times int, on time.Duration) {
 }
 
 func main() {
-	// Allow time to open the serial monitor
+	// Give the monitor time to attach.
 	time.Sleep(3 * time.Second)
 
 	println("uartx self-test starting")
 
-	// u := uartx.UART0
-	err := u.Configure(uartx.UARTConfig{
+	if err := u.Configure(uartx.UARTConfig{
 		BaudRate: uint32(baud),
 		TX:       machine.Pin(txPin),
 		RX:       machine.Pin(rxPin),
-	})
-	if err != nil {
+	}); err != nil {
 		println("Configure failed")
 		for {
 			ledBlink(1, 500*time.Millisecond)
@@ -97,8 +93,7 @@ func main() {
 	machine.LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	drain(u)
 
-	pass := 0
-	fail := 0
+	pass, fail := 0, 0
 	defer func() {
 		println("")
 		println("Summary")
@@ -117,8 +112,7 @@ func main() {
 	run := func(name string, f func() string) {
 		println("")
 		println("[Test]", name)
-		msg := f()
-		if msg == "" {
+		if msg := f(); msg == "" {
 			println("  PASS")
 			pass++
 		} else {
@@ -146,12 +140,16 @@ func main() {
 		}
 	})
 
-	run("sanity: short loopback (event-driven TX)", func() string {
+	run("sanity: short loopback (Write + blocking Read)", func() string {
 		drain(u)
 		msg := []byte("hello, uartx" + lineEnding)
+		// Write blocks until accepted (no drain).
+		if _, err := u.Write(msg); err != nil {
+			return "write failed"
+		}
+		// Read blocks until ≥1 byte; use recvExact to collect all.
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		go func() { _, _ = sendAllContext(ctx, u, msg) }()
 		got, err := recvExact(ctx, u, len(msg))
 		if err != nil {
 			return "timeout"
@@ -162,44 +160,44 @@ func main() {
 		return ""
 	})
 
-	run("blocking: RecvByteContext waits", func() string {
+	run("blocking: Read waits for a single byte", func() string {
 		drain(u)
-		want := byte('X')
+		want := byte('Z')
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 		go func() { _, _ = sendAllContext(ctx, u, []byte{want}) }()
-		got, err := u.RecvByteContext(ctx)
-		if err != nil {
-			return "timeout"
+		var b [1]byte
+		// Use blocking Read to fetch one byte.
+		if _, err := u.Read(b[:]); err != nil {
+			return "read error"
 		}
-		if got != want {
+		if b[0] != want {
 			return "wrong byte"
 		}
 		return ""
 	})
 
-	run("timeout: RecvSomeContext", func() string {
+	run("timeout: no data within 200ms using TryRead+Readable", func() string {
 		drain(u)
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
-		buf := make([]byte, 32)
-		n, err := u.RecvSomeContext(ctx, buf)
-		if err == nil && n > 0 {
-			return "expected timeout"
+		select {
+		case <-u.Readable():
+			return "unexpected data"
+		case <-ctx.Done():
+			return ""
 		}
-		return ""
 	})
 
 	run("notify: Readable channel", func() string {
 		drain(u)
-		ready := u.Readable()
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 		go func() { _, _ = sendAllContext(ctx, u, []byte("AB")) }()
 		select {
-		case <-ready:
-			got, _ := recvExact(ctx, u, 2)
-			if string(got) != "AB" {
+		case <-u.Readable():
+			got, err := recvExact(ctx, u, 2)
+			if err != nil || string(got) != "AB" {
 				return "wrong data"
 			}
 			return ""
@@ -211,9 +209,11 @@ func main() {
 	run("framing: two lines", func() string {
 		drain(u)
 		data := []byte("first line\r\nsecond line\n")
+		if _, err := u.Write(data); err != nil {
+			return "write failed"
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		go func() { _, _ = sendAllContext(ctx, u, data) }()
 		got, err := recvExact(ctx, u, len(data))
 		if err != nil {
 			return "timeout"
@@ -224,7 +224,7 @@ func main() {
 		return ""
 	})
 
-	run("binary: 4 KiB integrity", func() string {
+	run("binary: 4 KiB integrity (SHA-1)", func() string {
 		drain(u)
 		n := 4 * 1024
 		src := make([]byte, n)
@@ -233,23 +233,22 @@ func main() {
 			x = 1664525*x + 1013904223
 			src[i] = byte(x >> 24)
 		}
-		wantHash := sha1.Sum(src)
+		want := sha1.Sum(src)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		go func() { _, _ = sendAllContext(ctx, u, src) }()
-
 		got, err := recvExact(ctx, u, n)
 		if err != nil || len(got) != n {
 			return "timeout/short read"
 		}
-		if sha1.Sum(got) != wantHash {
+		if sha1.Sum(got) != want {
 			return "hash mismatch"
 		}
 		return ""
 	})
 
-	run("overflow: 8192 byte burst", func() string {
+	run("overflow: 8192-byte burst", func() string {
 		drain(u)
 		n := 8192
 		src := make([]byte, n)
@@ -260,11 +259,10 @@ func main() {
 		defer cancel()
 		go func() { _, _ = sendAllContext(ctx, u, src) }()
 		_, _ = recvExact(ctx, u, n)
-		// Informational only
 		return ""
 	})
 
-	run("throughput: 32 KiB write+read (event-driven TX)", func() string {
+	run("throughput: 32 KiB (event-driven TX)", func() string {
 		drain(u)
 		n := 32 * 1024
 		src := make([]byte, n)
@@ -276,13 +274,11 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		go func() { _, _ = sendAllContext(ctx, u, src) }()
-		_, err := recvExact(ctx, u, n)
-		elapsed := time.Since(start)
-		if err != nil {
+		if _, err := recvExact(ctx, u, n); err != nil {
 			return "timeout"
 		}
 
-		// Report speed as kilobits per second (kbps, decimal).
+		elapsed := time.Since(start)
 		ms := int(elapsed / time.Millisecond)
 		if ms <= 0 {
 			ms = 1
@@ -296,9 +292,11 @@ func main() {
 		_ = u.SetFormat(8, 1, uartx.ParityNone)
 		drain(u)
 		msg := []byte("format-ok" + lineEnding)
+		if _, err := u.Write(msg); err != nil {
+			return "write failed"
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		go func() { _, _ = sendAllContext(ctx, u, msg) }()
 		got, err := recvExact(ctx, u, len(msg))
 		if err != nil {
 			return "timeout"
@@ -315,7 +313,6 @@ func main() {
 
 // --- tiny helpers (no fmt) ---
 
-// itoa converts an int to decimal ASCII.
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -346,7 +343,6 @@ func twoDigits(n int) string {
 	return itoa(n)
 }
 
-// formatFixed2 formats an integer representing value×100 (two decimals).
 func formatFixed2(x int) string {
 	sign := ""
 	if x < 0 {
