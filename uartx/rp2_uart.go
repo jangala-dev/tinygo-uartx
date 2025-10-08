@@ -180,58 +180,56 @@ func initUART(uart *UART) {
 // --- TX helpers ---
 
 // attemptSend accepts up to len(p) bytes without blocking and returns
-// the number accepted. Foreground writes to UARTDR only when:
-//   - TXIM is masked (we own the start), or
-//   - TXIM is enabled but there is no pending TX IRQ (TXMIS==0) and the
-//     FIFO is empty (TXFE==1): in that case we briefly mask TXIM, seed
-//     the FIFO, then re-enable TXIM to ensure a level transition is seen.
-//
-// Any remainder goes into the software TX ring for the ISR to drain.
-//
-// This design avoids race conditions where foreground and ISR interleave writes
-// to UARTDR and still guarantees progress if a previous TXIC clear removed the
-// only pending edge while the FIFO is empty.
+// the number accepted into the software TX ring. It then performs a
+// safe "kick" by moving bytes from the SW ring into the HW FIFO in the
+// foreground only when we own TX start (TXIM masked) or in the masked
+// kick corner case. Steady-state draining remains ISR-driven.
 func (uart *UART) attemptSend(p []byte) int {
 	if len(p) == 0 {
 		return 0
 	}
-	sent := 0
 
-	const (
-		bTXIM  = uint32(rp.UART0_UARTIMSC_TXIM)
-		fTXFF  = uint32(rp.UART0_UARTFR_TXFF)
-		fTXFE  = uint32(rp.UART0_UARTFR_TXFE)
-		mTXMIS = uint32(rp.UART0_UARTMIS_TXMIS)
-	)
+	// 1) Enqueue into software TX ring only.
+	n := uart.enqueueTX(p)
 
-	// Case A: TXIM masked — we own the initial kick (safe to touch UARTDR).
-	if !uart.Bus.UARTIMSC.HasBits(bTXIM) {
-		for sent < len(p) && !uart.Bus.UARTFR.HasBits(fTXFF) {
-			uart.Bus.UARTDR.Set(uint32(p[sent]))
-			sent++
-		}
-		uart.Bus.UARTIMSC.SetBits(bTXIM) // arm TX interrupts; ISR handles steady-state
-	} else {
-		// Case B: TXIM enabled. If FIFO is empty and there is no pending TX IRQ,
-		// briefly mask to avoid interleave, seed FIFO to create a transition, then re-enable.
-		if uart.Bus.UARTFR.HasBits(fTXFE) && !uart.Bus.UARTMIS.HasBits(mTXMIS) {
-			uart.Bus.UARTIMSC.ClearBits(bTXIM)
-			for sent < len(p) && !uart.Bus.UARTFR.HasBits(fTXFF) {
-				uart.Bus.UARTDR.Set(uint32(p[sent]))
-				sent++
+	// Nothing queued? Still ensure TXIM is armed for any prior buffered data.
+	if uart.TxBuffer.Used() == 0 {
+		uart.Bus.UARTIMSC.SetBits(rp.UART0_UARTIMSC_TXIM)
+		return n
+	}
+
+	// 2) Perform a safe kick from SW->HW when required, sourcing bytes from the SW ring.
+
+	// Case A: TXIM masked — we own TX start; seed FIFO directly from SW ring.
+	if !uart.Bus.UARTIMSC.HasBits(rp.UART0_UARTIMSC_TXIM) {
+		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
+			b, ok := uart.TxBuffer.Get()
+			if !ok {
+				break
 			}
-			uart.Bus.UARTIMSC.SetBits(bTXIM)
+			uart.Bus.UARTDR.Set(uint32(b))
 		}
+		// Arm TX interrupts; ISR takes over steady-state.
+		uart.Bus.UARTIMSC.SetBits(rp.UART0_UARTIMSC_TXIM)
+		return n
 	}
 
-	// Enqueue any remainder for the ISR to move when TX FIFO has room.
-	if sent < len(p) {
-		sent += uart.enqueueTX(p[sent:])
-		// If we queued data while TXIM happened to be masked, ensure it is armed.
-		uart.enableTxIRQ()
+	// Case B: TXIM enabled. If FIFO empty and no pending TX IRQ, briefly mask,
+	// seed one or more bytes from SW ring to create a level transition, re-enable.
+	if uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFE) && !uart.Bus.UARTMIS.HasBits(rp.UART0_UARTMIS_TXMIS) {
+		uart.Bus.UARTIMSC.ClearBits(rp.UART0_UARTIMSC_TXIM)
+		// Seed at least one byte (and up to FIFO space) from SW ring.
+		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
+			b, ok := uart.TxBuffer.Get()
+			if !ok {
+				break
+			}
+			uart.Bus.UARTDR.Set(uint32(b))
+		}
+		uart.Bus.UARTIMSC.SetBits(rp.UART0_UARTIMSC_TXIM)
 	}
 
-	return sent
+	return n
 }
 
 // enableTxIRQ ensures TX level interrupts are unmasked.
