@@ -1,4 +1,7 @@
 // uartx/ringbuffer.go
+
+//go:build atmega || esp || nrf || sam || sifive || stm32 || k210 || nxp || rp2040 || rp2350
+
 // An API-compatible replacement for machine.RingBuffer with an added Size() method.
 // Methods and semantics match TinyGo's implementation.
 
@@ -33,21 +36,24 @@ func (rb *RingBuffer) Used() uint8 {
 
 // Put stores a byte in the buffer. If the buffer is already full, it returns false.
 func (rb *RingBuffer) Put(val byte) bool {
-	if rb.Used() != bufferSize {
-		rb.head.Set(rb.head.Get() + 1)
-		rb.rxbuffer[rb.head.Get()%bufferSize].Set(val)
-		return true
+	if rb.Used() == bufferSize { // full
+		return false
 	}
-	return false
+	h := rb.head.Get()
+	rb.rxbuffer[(h+1)%bufferSize].Set(val) // 1) write data
+	rb.head.Set(h + 1)                     // 2) publish
+	return true
 }
 
 // Get returns a byte from the buffer. If the buffer is empty, it returns (0, false).
 func (rb *RingBuffer) Get() (byte, bool) {
-	if rb.Used() != 0 {
-		rb.tail.Set(rb.tail.Get() + 1)
-		return rb.rxbuffer[rb.tail.Get()%bufferSize].Get(), true
+	if rb.Used() == 0 {
+		return 0, false
 	}
-	return 0, false
+	t := rb.tail.Get()
+	v := rb.rxbuffer[(t+1)%bufferSize].Get() // 1) read current element
+	rb.tail.Set(t + 1)                       // 2) publish consumption
+	return v, true
 }
 
 // Clear resets the head and tail pointers to zero.
