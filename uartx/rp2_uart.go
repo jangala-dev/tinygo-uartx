@@ -214,11 +214,16 @@ func (uart *UART) attemptSend(p []byte) int {
 		return n
 	}
 
-	// Case B: TXIM enabled. If FIFO empty and no pending TX IRQ, briefly mask,
-	// seed one or more bytes from SW ring to create a level transition, re-enable.
-	if uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFE) && !uart.Bus.UARTMIS.HasBits(rp.UART0_UARTMIS_TXMIS) {
+	// Case B: only kick if we can actually write ≥1 byte now.
+	if uart.Bus.UARTIMSC.HasBits(rp.UART0_UARTIMSC_TXIM) &&
+	!uart.Bus.UARTMIS.HasBits(rp.UART0_UARTMIS_TXMIS) &&
+	!uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) && // FIFO has space
+	(uart.TxBuffer.Used() > 0) {                      // something to seed
+
+		// Prevent ISR interleave while we start TX.
 		uart.Bus.UARTIMSC.ClearBits(rp.UART0_UARTIMSC_TXIM)
-		// Seed at least one byte (and up to FIFO space) from SW ring.
+
+		// Seed from SW ring until FIFO becomes full or SW empties.
 		for !uart.Bus.UARTFR.HasBits(rp.UART0_UARTFR_TXFF) {
 			b, ok := uart.TxBuffer.Get()
 			if !ok {
@@ -226,7 +231,12 @@ func (uart *UART) attemptSend(p []byte) int {
 			}
 			uart.Bus.UARTDR.Set(uint32(b))
 		}
+
+		// Re-enable TX level interrupts. Next drop to/under IFLS will raise TX IRQ.
 		uart.Bus.UARTIMSC.SetBits(rp.UART0_UARTIMSC_TXIM)
+
+		// Could perform a userland nudge here - better for latency but untested.
+		// select { case uart.txNotify <- struct{}{}: default: }
 	}
 
 	return n
