@@ -184,3 +184,19 @@ func (u *UART) TxFree() int { return int(u.TxBuffer.Size() - u.TxBuffer.Used()) 
 func (uart *UART) Receive(data byte) {
 	uart.Buffer.Put(data)
 }
+
+// RXDrops returns the cumulative number of RX bytes that have been dropped
+// since boot. hw counts bytes that arrived from the PL011 with any of its
+// per-byte error bits set (OE, BE, PE, FE); the most informative of these
+// is OE, which means the hardware FIFO overflowed before the ISR serviced
+// it. sw counts bytes the ISR could not enqueue because the software RX
+// ring was full. Both counters are monotonic and wrap at 2^32.
+//
+// In a healthy steady state both counters should stay at zero at the
+// package's supported bauds. A nonzero hw count indicates ISR latency
+// exceeded one character time at the configured baud; a nonzero sw count
+// indicates the application's foreground consumer is not draining the
+// ring fast enough.
+func (uart *UART) RXDrops() (hw, sw uint32) {
+	return uart.rxHwDrops.Get(), uart.rxSwDrops.Get()
+}

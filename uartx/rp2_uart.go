@@ -14,6 +14,7 @@ import (
 	"errors"
 	"machine"
 	"runtime/interrupt"
+	"runtime/volatile"
 )
 
 // UART represents a single PL011 instance on RP2040/RP2350.
@@ -38,6 +39,15 @@ type UART struct {
 	notify    chan struct{} // coalesced RX readiness notifications
 
 	baud uint32 // last configured baud (for diagnostics, not used by HW)
+
+	// Drop counters incremented from the RX ISR and read from foreground
+	// context via RXDrops. Single writer (the ISR) plus 32-bit aligned
+	// reads means no locking is required on a single-core MCU. On a
+	// dual-core MCU these are still race-free for Cortex-M0+/M33 because
+	// aligned 32-bit loads and stores are naturally atomic; the counters
+	// may however read slightly stale in that case.
+	rxHwDrops volatile.Register32 // bytes with PL011 error bits set (OE/BE/PE/FE)
+	rxSwDrops volatile.Register32 // bytes the ISR could not enqueue because Buffer was full
 }
 
 // Configure sets up the PL011, its pins and interrupts. It leaves RXIM/RTIM
@@ -303,13 +313,21 @@ func (uart *UART) handleInterrupt(interrupt.Interrupt) {
 			r := uart.Bus.UARTDR.Get()
 			if (r & (rp.UART0_UARTDR_OE | rp.UART0_UARTDR_BE |
 				rp.UART0_UARTDR_PE | rp.UART0_UARTDR_FE)) != 0 {
-				// Drop errored byte; reading DR clears the per-byte error flags.
+				// Drop errored byte; reading DR clears the per-byte error
+				// flags. UARTDR_OE specifically means the hardware FIFO
+				// overflowed before this ISR got here, so this counts as
+				// an observable drop from the consumer's point of view.
+				uart.rxHwDrops.Set(uart.rxHwDrops.Get() + 1)
 				continue
 			}
 			if uart.Buffer.Put(byte(r & 0xFF)) {
 				enq++
 			} else {
-				// optional rxDrops++
+				// Software RX ring is full: the foreground hasn't drained
+				// it in time. Count the drop so the application can
+				// surface it; silently losing bytes here is what motivated
+				// the ring resize and these counters.
+				uart.rxSwDrops.Set(uart.rxSwDrops.Get() + 1)
 			}
 		}
 
